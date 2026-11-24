@@ -2,6 +2,8 @@
 
 # Asterhelm · Personal Super Agent
 
+**[访问 Asterhelm 项目主页](https://whw2808.github.io/asterhelm/)**
+
 **Asterhelm（星舵）是一个可自托管的 Personal Super Agent。** 你只和星舵对话。它记得你的偏好和未完事项，结合已接入的会话，选出合适的设备和 Agent 来处理任务。即使只是查证一条信息，你也能在原对话里看到谁在处理、进展如何、用了多久，并在这里收到结果。到了约定的时间，或关注的会话有了变化，星舵会主动提醒你。
 
 Talk to Asterhelm in one place. It remembers your preferences and unfinished work, delegates tasks to the agents on your devices, and brings the results back to the conversation.
@@ -52,7 +54,7 @@ node server/control.mjs get TASK_ID
 
 - [自托管指南](docs/self-hosting.md) · 部署服务端、接入模型、建立设备信任与手机配对
 - [Android 构建指南](android/README.md) · 为自己的服务地址构建和安装客户端
-- [项目主页](https://whw2808.github.io/asterhelm/) · [展示页源码](docs/showcase/index.html)
+- [展示页源码](docs/showcase/index.html)
 - [贡献流程](CONTRIBUTING.md) · Issue、分支、Pull Request 和版本发布
 - [版本记录](CHANGELOG.md) · [GitHub Releases](https://github.com/whw2808/asterhelm/releases)
 - [MIT 许可证](LICENSE) · [第三方许可](THIRD_PARTY.md) · [安全问题反馈](SECURITY.md)
