@@ -10,7 +10,7 @@ Talk to Asterhelm in one place. It remembers your preferences and unfinished wor
 
 **设计来源**　Asterhelm 的调度设计参考了 DeepSeek Harness（DSH）团队的 Super Agent 研究原型。其中，Router 负责对话和派单，Worker 执行任务并回报。星舵把这种分工用在个人的多设备、多 Agent 协作中。[DSH Super Agent 研究原型](https://github.com/deepseek-ai/dsh-superagent-prototype)
 
-<p align="center"><img src="docs/showcase/assets/example-chat.webp" width="210" alt="含派单回执的虚构示例对话"> &nbsp; <img src="docs/images/device-dashboard.webp" width="210" alt="Mac mini 和 Laptop 的设备看板，显示 Codex 和 DeepSeek Harness 的就绪状态"></p>
+<p align="center"><img src="docs/showcase/assets/example-chat.webp" height="436" alt="含派单回执的虚构示例对话"> &nbsp; <img src="docs/images/device-dashboard.webp" height="436" alt="Mac mini 和 Laptop 的设备看板，显示 Codex 和 DeepSeek Harness 的就绪状态"></p>
 
 ## 先跑通一次本地派单
 
