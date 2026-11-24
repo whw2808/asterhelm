@@ -40,6 +40,8 @@ nav a:hover,.text-link:hover { color:var(--blue) }
 .intro,.product-intro,.case-heading>p,.view-copy p,.notes p { color:var(--muted) }
 .intro { font-size:clamp(1.01rem,1.22vw,1.18rem); max-width:25.8em; line-height:1.85; margin-top:1rem }
 .hero-links { flex-wrap:wrap; gap:clamp(20px,2.4vw,36px); margin-top:1.8rem }
+.design-credit { margin-top:1.15rem; font-size:.87rem; line-height:1.65; color:var(--muted) }
+.design-credit a { color:var(--blue); text-decoration:underline; text-underline-offset:.18em }
 .button-solid { display:inline-flex; align-items:center; justify-content:center; min-height:47px; padding:.65rem 1.35rem; font-weight:600; font-size:.95rem; color:#fff; background:#292a67; border-radius:999px; box-shadow:0 6px 16px #35387a21 }
 .button-solid:hover { background:#3844b0 }
 .text-link { font-size:.94rem; border-bottom:1px solid #a2a3b5; padding:.35rem 0; font-weight:560 }

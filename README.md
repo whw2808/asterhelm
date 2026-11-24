@@ -1,10 +1,12 @@
 <p align="center"><img src="docs/showcase/assets/asterhelm.webp" width="78" alt=""></p>
 
-# Asterhelm 星舵
+# Asterhelm · Personal Super Agent
 
-**一个个人助手，调度你自己的多台设备和多个 Agent。** 你在手机上提出问题，星舵根据已注册的设备、Agent 能力和已有上下文安排工作。只读查证也会在原对话中显示执行设备、Agent、进度、耗时和结果。
+**Asterhelm（星舵）是一个可自托管的 Personal Super Agent。** 你只和星舵对话。它记得你的偏好和未完事项，结合已接入的会话，选出合适的设备和 Agent 来处理任务。即使只是查证一条信息，你也能在原对话里看到谁在处理、进展如何、用了多久，并在这里收到结果。到了约定的时间，或关注的会话有了变化，星舵会主动提醒你。
 
-Asterhelm is a self-hosted personal assistant. One conversation routes work across your registered devices and agents and brings the results back to you.
+Talk to Asterhelm in one place. It remembers your preferences and unfinished work, delegates tasks to the agents on your devices, and brings the results back to the conversation.
+
+**设计来源**　Asterhelm 的调度设计参考了 DeepSeek Harness（DSH）团队的 Super Agent 研究原型。其中，Router 负责对话和派单，Worker 执行任务并回报。星舵把这种分工用在个人的多设备、多 Agent 协作中。[DSH Super Agent 研究原型](https://github.com/deepseek-ai/dsh-superagent-prototype)
 
 <p align="center"><img src="docs/showcase/assets/example-chat.webp" width="210" alt="含派单回执的虚构示例对话"> &nbsp; <img src="docs/showcase/assets/example-board.webp" width="210" alt="按设备和 Agent 分组的示例看板"></p>
 
