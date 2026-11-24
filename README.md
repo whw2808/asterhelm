@@ -50,7 +50,7 @@ node server/control.mjs get TASK_ID
 
 - [自托管指南](docs/self-hosting.md) · 部署服务端、接入模型、建立设备信任与手机配对
 - [Android 构建指南](android/README.md) · 为自己的服务地址构建和安装客户端
-- [项目展示页源码](docs/showcase/index.html) · 下载源码后可直接在浏览器里打开
+- [项目主页](https://whw2808.github.io/asterhelm/) · [展示页源码](docs/showcase/index.html)
 - [贡献流程](CONTRIBUTING.md) · Issue、分支、Pull Request 和版本发布
 - [版本记录](CHANGELOG.md) · [GitHub Releases](https://github.com/whw2808/asterhelm/releases)
 - [MIT 许可证](LICENSE) · [第三方许可](THIRD_PARTY.md) · [安全问题反馈](SECURITY.md)
