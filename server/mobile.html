@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+  <meta name="theme-color" content="#e8e7fd">
+  <meta name="referrer" content="no-referrer">
+  <title>Asterhelm</title>
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <main class="shell">
+    <div class="scenery" aria-hidden="true">
+      <svg viewBox="0 0 400 720" preserveAspectRatio="none"><path d="M0 643 C157 641 267 487 400 479 L400 720 H0Z" fill="#cdcdfa" opacity=".33"/><path d="M0 674 C147 635 294 562 400 576 L400 720 H0Z" fill="#dedcf9" opacity=".36"/></svg>
+    </div>
+    <header class="app-header">
+      <div class="identity"><img src="/assistant-mark.webp" alt="" width="45" height="45"><div><h1>Asterhelm</h1><p>个人助手</p></div></div>
+      <div id="actions" class="header-actions" hidden>
+        <button id="history" class="icon-button" type="button" aria-label="对话记录" aria-expanded="false" aria-controls="history-panel"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6v4h4M3.4 9.5a8.6 8.6 0 1 1 .5 6.4M12 7.5V12l3 2"/></svg></button>
+        <button id="more" class="icon-button" type="button" aria-label="更多选项" aria-expanded="false" aria-controls="menu"><svg viewBox="0 0 24 24" aria-hidden="true" class="dots"><circle cx="4" cy="12" r="1.7"/><circle cx="12" cy="12" r="1.7"/><circle cx="20" cy="12" r="1.7"/></svg></button>
+      </div>
+    </header>
+    <section id="menu" class="popover" aria-label="更多选项" hidden>
+      <button id="refresh" type="button">刷新</button>
+      <button id="reminders" type="button" hidden>开启后台提醒</button>
+      <button id="system-settings" type="button" hidden>系统通知设置</button>
+      <button id="logout" type="button">退出这台设备</button>
+    </section>
+    <section id="history-panel" class="popover record-panel" aria-labelledby="records-title" hidden>
+      <h2 id="records-title">对话记录</h2>
+      <div id="record-list"></div>
+      <button id="record-earlier" type="button" hidden>加载更早的记录</button>
+    </section>
+    <div id="feedback" class="feedback" hidden><p id="notice" role="status"></p><button id="retry" class="quiet" type="button" hidden>重试</button></div>
+    <section id="pairing" class="pairing" aria-labelledby="pair-title" hidden>
+      <h2 id="pair-title">连接个人助手</h2>
+      <p id="pair-help">在服务器上生成配对邀请，然后将链接或配对码粘贴到这里。</p>
+      <form id="pair-form">
+        <label for="pair-input">配对链接或配对码</label>
+        <input id="pair-input" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="粘贴链接或配对码">
+        <div class="pair-actions">
+          <a id="native" class="button primary" hidden>用安卓 App 打开</a>
+          <button type="submit" id="pair-web" class="button">连接网页版</button>
+        </div>
+      </form>
+      <a id="android-install" class="install" href="/android.apk" download="Asterhelm.apk" hidden>下载安卓安装包</a>
+    </section>
+    <section id="chat" class="chat" aria-label="对话" hidden>
+      <button id="latest" class="quiet latest" type="button" hidden>返回最新对话 ↓</button>
+      <div id="conversation" class="conversation">
+        <div id="welcome" class="welcome" hidden>
+          <img src="/assistant-mark.webp" alt="" width="64" height="64">
+          <h2>想先聊点什么？</h2>
+          <div id="suggestions">
+            <button type="button">已连接的设备有哪些任务？</button>
+            <button type="button">有哪些事在等我？</button>
+          </div>
+        </div>
+        <button id="earlier" class="quiet earlier" type="button" hidden>加载更早的消息</button>
+        <div id="messages" role="log" aria-label="聊天记录" aria-live="off"></div>
+        <p id="thinking" role="status" hidden>助手正在回复…</p>
+      </div>
+      <div id="attached" class="attached" hidden><span id="context-title"></span><button id="detach" class="quiet" type="button" aria-label="移除附上的会话">移除</button></div>
+      <form id="composer">
+        <label class="sr" for="message">给个人助手发消息</label>
+        <textarea id="message" rows="1" maxlength="16000" required placeholder="发消息…" enterkeyhint="enter"></textarea>
+        <button id="send" class="primary" type="submit" disabled aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m20.2 3.5-5.7 16.2c-.3.9-1.2 1-1.6.2l-3.1-6.2 5.9-6.1-7.2 4.8L3 10.1c-.9-.3-.9-1.2 0-1.5l16.3-5.9c.7-.2 1.2.1.9.8Z"/></svg></button>
+      </form>
+    </section>
+    <section id="board" class="board" aria-labelledby="board-title" hidden>
+      <div class="board-heading">
+        <button id="back-board" type="button" class="quiet" hidden>‹ 返回看板</button>
+        <h2 id="board-title" tabindex="-1">看板</h2>
+      </div>
+      <div id="board-content"></div>
+    </section>
+    <nav id="tabs" class="tabs" aria-label="主导航" hidden>
+      <button id="tab-chat" type="button" aria-controls="chat"><svg viewBox="0 0 28 26" aria-hidden="true"><path class="tab-fill" d="M13.6 2.1C7.3 2.1 2.3 6.4 2.3 12c0 2.2.8 4.1 2.2 5.8l-.9 5.4 5.7-2.8c1.4.5 2.8.7 4.3.7 6.4 0 11.6-4.1 11.6-9.1S20 2.1 13.6 2.1Z"/><g class="tab-dots"><circle cx="9" cy="11.9" r="1.2"/><circle cx="14" cy="11.9" r="1.2"/><circle cx="19" cy="11.9" r="1.2"/></g></svg><span>对话</span></button>
+      <button id="tab-board" type="button" aria-controls="board"><svg viewBox="0 0 28 26" aria-hidden="true"><g class="tab-fill"><rect x="3.5" y="2.5" width="8" height="8" rx="2.1"/><rect x="16.5" y="2.5" width="8" height="8" rx="2.1"/><rect x="3.5" y="15.5" width="8" height="8" rx="2.1"/><rect x="16.5" y="15.5" width="8" height="8" rx="2.1"/></g></svg><span>看板</span></button>
+    </nav>
+    <dialog id="source-dialog" aria-labelledby="source-heading">
+      <h2 id="source-heading">来源路径</h2>
+      <textarea id="source-path" rows="3" readonly aria-label="来源路径" spellcheck="false"></textarea>
+      <p id="copy-status" role="status"></p>
+      <div class="source-actions"><button id="close-source" type="button">关闭</button><button id="copy-source" class="primary" type="button">复制路径</button></div>
+    </dialog>
+  </main>
+</body>
+</html>

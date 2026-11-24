@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#f6f6fd">
+  <meta name="description" content="Asterhelm 星舵是你的个人 AI 助手。在同一场对话里，它接续已有会话，把任务分给不同设备上的 Agent，并带回结果。">
+  <meta property="og:title" content="Asterhelm 星舵 · 一个助手，调动多台电脑">
+  <meta property="og:description" content="通过虚构的协作示例，了解个人助手如何在多台设备之间派单、跟进和交付。">
+  <title>Asterhelm 星舵 · 个人多机 AI 助手</title>
+  <link rel="icon" type="image/webp" href="./assets/asterhelm.webp">
+  <link rel="stylesheet" href="./style.css">
+  <link rel="preload" as="image" href="./assets/orbit.webp">
+  <script defer src="./showcase.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到正文</a>
+<header class="mast">
+  <div class="wrap navbar">
+    <a class="brand" aria-label="Asterhelm 星舵首页" href="#overview"><img width="34" height="30" alt="" src="./assets/asterhelm.webp"><span lang="en">Asterhelm</span></a>
+    <nav aria-label="页面导航"><a href="#flow">协作演示</a><a href="#mobile">手机界面</a></nav>
+  </div>
+</header>
+<main id="main">
+  <section class="hero" id="overview" aria-labelledby="hero-title">
+    <div class="hero-art" aria-hidden="true"><img src="./assets/orbit.webp" width="1448" height="1086" alt="" fetchpriority="high"></div>
+    <div class="wrap hero-grid">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="aster" aria-hidden="true">✳</span> 星舵 · 个人 AI 助手</p>
+        <h1 id="hero-title" lang="en">Asterhelm</h1>
+        <h2>一个助手，调动多台电脑。</h2>
+        <p class="intro">在手机上说出你想做的事。星舵会接上已有的工作，找到合适的设备和 Agent，把答案带回这场对话。</p>
+        <div class="hero-links"><a class="button-solid" href="#flow">看一次派单演示</a><a class="text-link" href="#mobile">浏览界面示例</a></div>
+      </div>
+    </div>
+  </section>
+  <aside class="hardware" aria-label="协作中的三个角色">
+    <div class="wrap hardware-row">
+      <div class="hw"><span class="hw-icon computer" aria-hidden="true"></span><div><strong>个人助手</strong><small>理解问题 · 安排任务</small></div></div>
+      <div class="hw"><span class="hw-icon notebook" aria-hidden="true"></span><div><strong>执行 Agent</strong><small>领取任务 · 返回结果</small></div></div>
+      <div class="hw"><span class="hw-icon handset" aria-hidden="true"></span><div><strong>移动端</strong><small>对话 · 看板 · 提醒</small></div></div>
+    </div>
+  </aside>
+  <section class="case section" id="flow" aria-labelledby="flow-title">
+    <div class="wrap">
+      <div class="case-heading">
+        <div><p class="label">协作演示</p><h2 id="flow-title">一个问题的去向。</h2></div>
+        <p>把几条展品说明整理成分类索引，星舵会怎样派单？可以切换下方三个环节，查看这个虚构示例。</p>
+      </div>
+      <div class="case-panel">
+        <div class="case-brief">
+          <p class="case-type">示例任务 <span>·</span> 资料整理</p>
+          <blockquote>“给这组虚构展品做一份分类索引。”</blockquote>
+          <p class="case-input">示例条目 <span>纸雕 / 木刻 / 玻璃器</span></p>
+        </div>
+        <div class="case-log">
+          <div class="times" role="tablist" aria-label="派单时间线">
+            <button type="button" role="tab" id="step-request" aria-controls="pane-request" aria-selected="false" tabindex="-1"><span>提出请求</span></button>
+            <button type="button" role="tab" id="step-run" aria-controls="pane-run" aria-selected="true"><span>领取任务</span></button>
+            <button type="button" role="tab" id="step-reply" aria-controls="pane-reply" aria-selected="false" tabindex="-1"><span>交回结果</span></button>
+          </div>
+          <div class="event" id="pane-request" role="tabpanel" aria-labelledby="step-request" tabindex="0" hidden>
+            <p class="actor">移动端 <span>/</span> Asterhelm</p><h3>先弄清要交付什么。</h3><p>星舵从请求中提取要交付的内容：每件展品对应一个分类，最后形成一份可阅读的索引。</p>
+          </div>
+          <div class="event" id="pane-run" role="tabpanel" aria-labelledby="step-run" tabindex="0">
+            <p class="actor">示例节点 B <span>/</span> 整理助手</p><h3>交给能处理这份资料的 Agent。</h3><p>整理助手接单，按材料归类。主聊天中的任务卡显示分给了哪个节点、哪个 Agent，以及它目前的进度。</p>
+          </div>
+          <div class="event" id="pane-reply" role="tabpanel" aria-labelledby="step-reply" tabindex="0" hidden>
+            <p class="actor">Asterhelm <span>/</span> 移动端</p><h3>把索引带回这场对话。</h3><p>星舵汇总分类结果：纸雕归入纸艺，木刻归入木作，玻璃器归入玻璃工艺。之后还可以接着讨论分类标准。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section class="mobile section" id="mobile" aria-labelledby="mobile-title">
+    <div class="wrap product-grid">
+      <div class="product-copy">
+        <p class="label">手机界面</p>
+        <h2 id="mobile-title">手里一个入口。<br>身后多台机器。</h2>
+        <p class="product-intro">日常只和星舵对话。想看看谁在工作时，切到看板就能找到对应的设备、Agent 和会话。</p>
+        <div class="switch" role="tablist" aria-label="切换界面示例">
+          <button type="button" role="tab" id="view-chat" aria-selected="true" aria-controls="phone-chat">主聊天</button>
+          <button type="button" role="tab" id="view-board" aria-selected="false" aria-controls="phone-board" tabindex="-1">机器看板</button>
+        </div>
+        <div aria-live="polite" class="view-copy">
+          <div id="phone-chat" role="tabpanel" aria-labelledby="view-chat"><h3>进度就在原问题下方。</h3><p>只读查询和执行任务都会留下派单卡。可以扫一眼耗时，也可以点开报告，再接着问。</p></div>
+          <div id="phone-board" role="tabpanel" aria-labelledby="view-board" hidden><h3>按机器分栏，按 Agent 查看。</h3><p>设备和 Agent 注册后出现在看板里。点进一张卡片，查看任务或带着选中的历史会话回到聊天。</p></div>
+        </div>
+      </div>
+      <figure class="phone-stage">
+        <div class="device-screen"><button type="button" id="zoom-screen" aria-haspopup="dialog" aria-label="放大当前界面示例"><img id="screen" src="./assets/example-chat.webp" width="800" height="1662" alt="示例聊天展示一项虚构的展品整理任务、执行 Agent 和交付结果。" loading="lazy"></button></div>
+        <figcaption>晴蓝界面 <span>·</span> 虚构设备与示例数据</figcaption>
+      </figure>
+    </div>
+  </section>
+  <section class="continuity" aria-labelledby="continue-title">
+    <div class="wrap continuity-grid">
+      <div><p class="label">长期协作</p><h2 id="continue-title">下次，从这里继续。</h2></div>
+      <div class="notes"><article><h3>接上已有的会话</h3><p>已经在某台设备上开始的会话，可以从手机找到。选中它，就能带着原先的上下文继续。</p></article><article><h3>记住偏好与未完事项</h3><p>把长期偏好和待跟进的事交代给星舵，下次聊同一件事时可以接着说。</p></article><article><h3>该提醒时，来找你</h3><p>约定的时间到了，或关注的会话发生变化，星舵可以发出系统通知，点开回到对应消息。</p></article></div>
+    </div>
+  </section>
+</main>
+<footer><div class="wrap foot"><a class="brand" href="#overview"><img width="29" height="26" alt="" src="./assets/asterhelm.webp"><span lang="en">Asterhelm</span></a><a class="text-link" href="#overview">回到顶部</a></div></footer>
+<dialog id="image-dialog" aria-label="放大查看界面示例"><button type="button" id="close" autofocus>关闭</button><img id="full-screen" width="800" height="1662" alt=""></dialog>
+</body></html>
