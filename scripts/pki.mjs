@@ -96,7 +96,9 @@ function sign(opts) {
   inStaging(issued, temp => {
     const checked = path.join(temp, 'client.csr');
     fs.copyFileSync(csr, checked);
-    const subject = openssl('req', '-in', checked, '-noout', '-verify', '-subject', '-nameopt', 'RFC2253').trim();
+    // Some OpenSSL versions write verification diagnostics to stdout alongside the subject.
+    openssl('req', '-in', checked, '-noout', '-verify');
+    const subject = openssl('req', '-in', checked, '-noout', '-subject', '-nameopt', 'RFC2253').trim();
     if (subject.replace(/^subject=\s*/, '') !== 'CN=' + id) throw Error('The request subject must contain only the selected device ID as its common name.');
     const certificate = path.join(temp, 'client.crt');
     issue(pki, temp, checked, certificate, [
