@@ -1,5 +1,5 @@
 import { Lexer } from './mobile-marked.mjs';
-import { ChatBinding, cardCommand, cardRequest, chatDisplayText, liveWork, mergeWorkHistory, refreshOlderWork } from './mobile-work.mjs';
+import { ChatBinding, cardCommand, cardRequest, chatDisplayText, liveWork, mergeWorkHistory, refreshOlderWork, usageTokenCount } from './mobile-work.mjs';
 
 const native = location.origin === 'https://appassets.androidplatform.net'
   ? (await import('/android-host.js')).default : null;
@@ -707,14 +707,15 @@ function line(text, meta) {
   if (meta) li.append(node('span', meta, 'row-meta'));
   return li;
 }
+function rememberDisclosure(section, label) {
+  const key = JSON.stringify([selectedAgent, label]);
+  section.open = detailsOpen.has(key);
+  section.ontoggle = () => { if (section.isConnected) section.open ? detailsOpen.add(key) : detailsOpen.delete(key); };
+}
 function group(label, data, formatter, { empty, collapsible = false, total = data.length } = {}) {
   const section = node(collapsible ? 'details' : 'section', undefined, 'group');
   section.append(node(collapsible ? 'summary' : 'h3', label + (total ? ' · ' + total : '')));
-  if (collapsible) {
-    const key = JSON.stringify([selectedAgent, label]);
-    section.open = detailsOpen.has(key);
-    section.ontoggle = () => { if (section.isConnected) section.open ? detailsOpen.add(key) : detailsOpen.delete(key); };
-  }
+  if (collapsible) rememberDisclosure(section, label);
   if (!data.length) { section.append(node('p', empty || '暂无记录', 'empty')); return section; }
   const ul = node('ul', undefined, 'group-list');
   ul.append(...data.map(formatter)); section.append(ul);
@@ -878,11 +879,57 @@ function agentDetails(machine, agent) {
   if (finished.length) content.push(group('已结束的任务', finished, taskLine, { collapsible: true }));
   return content;
 }
+function usageTable(label, rows) {
+  const table = node('table', undefined, 'usage-table');
+  const header = table.createTHead().insertRow();
+  for (const text of [label, '输入', '输出', '合计']) {
+    const th = node('th', text);
+    th.scope = 'col'; header.append(th);
+  }
+  const body = table.createTBody();
+  for (const [title, bucket] of rows) {
+    const row = body.insertRow();
+    const th = node('th', title);
+    th.scope = 'row'; row.append(th);
+    for (const field of ['inputTokens', 'outputTokens', 'totalTokens']) {
+      row.insertCell().textContent = usageTokenCount(bucket, field);
+    }
+  }
+  return table;
+}
+function boardUsage(usage) {
+  const { today, allTime } = usage;
+  const section = node('details', undefined, 'group usage');
+  rememberDisclosure(section, 'Token 用量');
+  const summary = node('summary');
+  const count = usageTokenCount(today, 'totalTokens');
+  summary.append(node('strong', 'Token 用量'), node('span', count === '—' ? '今日未上报' : '今日 ' + count, 'usage-today'));
+  section.append(summary);
+  const since = new Date(usage.since).toLocaleString('zh-CN', {
+    timeZone: usage.timeZone, year: 'numeric', month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  });
+  section.append(node('p', '仅计总控模型 · 自 ' + since + ' 起（' + usage.timeZone + '）', 'usage-meta'));
+  section.append(usageTable('时段', [['今日', today], ['累计', allTime]]));
+  const phases = { chat: '对话规划', delivery: '交付汇总', workWake: '工作唤醒', review: '定时复查' };
+  const active = (usage.byPhase || []).filter(bucket => bucket.calls && Object.hasOwn(phases, bucket.phase));
+  if (active.length) section.append(usageTable('累计分项', active.map(bucket => [phases[bucket.phase], bucket])));
+  const notes = ['今日 ' + today.calls + ' 次调用，累计 ' + allTime.calls + ' 次。'];
+  if (allTime.cachedReportedCalls && allTime.cachedInputTokens) {
+    notes.push('累计输入中，已上报缓存命中 ' + allTime.cachedInputTokens.toLocaleString('zh-CN') + ' 个 Token。');
+  }
+  if (allTime.unknownCalls || allTime.partialCalls) {
+    const incomplete = bucket => (bucket.unknownCalls || 0) + (bucket.partialCalls || 0);
+    notes.push('今日 ' + incomplete(today) + ' 次、累计 ' + incomplete(allTime) + ' 次调用的用量未完整上报。≥ 表示已知小计，— 表示未上报。');
+  }
+  section.append(node('p', notes.join(''), 'usage-meta'));
+  return section;
+}
 function boardOverview(value) {
   const grid = node('div', undefined, 'machine-grid');
   grid.append(...(value.machines || []).map(machineColumn));
   if (!grid.children.length) grid.append(node('p', '暂无已接入的机器。', 'empty'));
   const sections = [grid];
+  if (value.usage?.today && value.usage.allTime) sections.push(boardUsage(value.usage));
   const more = { collapsible: true };
   if (value.unassignedTasks?.length) sections.push(group('未归属 Agent 的任务', value.unassignedTasks, taskLine, more));
   if (value.unassignedSessions?.length) sections.push(group('未归属 Agent 的会话', value.unassignedSessions, sessionLine, more));

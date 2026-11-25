@@ -1,6 +1,7 @@
 const screens = {
   'view-chat': {image: './assets/example-chat.webp', alt: '虚构展品索引的示例聊天，显示整理助手的派单卡及回复。'},
   'view-board': {image: './assets/example-board.webp', alt: '示例看板中，节点 A 和节点 B 各有自己的 Agent。'},
+  'view-usage': {image: './assets/example-usage.webp', alt: '虚构用量示例。总控今日输入 1,800、输出 360 个 token。累计有一次调用缺少用量，已知至少 9,540 个 token。'},
 };
 const screen = document.querySelector('#screen');
 for (const group of document.querySelectorAll('[role="tablist"]')) {

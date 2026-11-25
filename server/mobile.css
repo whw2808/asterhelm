@@ -207,6 +207,19 @@ textarea::placeholder { color: #696e8c; }
 .group > h3,.group > summary { font-size: .94rem; font-weight: 650; }
 .group > h3 { padding-top: 11px; }
 .group > summary { min-height: 44px; align-content: center; padding-block: 10px; }
+.usage { font-variant-numeric: tabular-nums; }
+.usage > summary { display: flex; gap: 8px; align-items: center; list-style: none; }
+.usage > summary::-webkit-details-marker { display: none; }
+.usage > summary::after { content: '›'; color: var(--muted); font-size: 1.12rem; line-height: 1; }
+.usage[open] > summary::after { transform: rotate(90deg); }
+.usage-today { margin-inline-start: auto; font-size: .84rem; font-weight: 550; color: var(--accent); }
+.usage-meta { margin: 0 0 10px; color: var(--muted); font-size: .77rem; overflow-wrap: anywhere; }
+.usage-table { width: 100%; table-layout: fixed; border-collapse: collapse; margin-bottom: 10px; font-size: .85rem; }
+.usage-table th,.usage-table td { padding: 5px 3px; text-align: end; overflow-wrap: anywhere; }
+.usage-table th:first-child { text-align: start; }
+.usage-table th { font-weight: 550; }
+.usage-table thead { border-bottom: 1px solid var(--line); color: var(--muted); font-size: .75rem; }
+.usage-table tbody td:last-child { font-weight: 650; }
 .group-list { list-style: none; padding: 0; margin: 4px 0 10px; }
 .group-list li { overflow-wrap: anywhere; padding: 6px 0; }
 .group-list li + li { border-top: 1px solid var(--line); }

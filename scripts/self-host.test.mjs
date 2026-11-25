@@ -77,6 +77,7 @@ async function sendChat(env, hub, message, answer) {
     const response = await api('history', {}, cookie);
     return (await response.json()).value.messages.some(row => row.role === 'assistant' && row.text.includes(answer));
   }, hub);
+  return cookie;
 }
 
 function workerOnline(env, target) {
@@ -198,7 +199,8 @@ test('Chat Completions planner dispatches to a native executor and returns the r
           type: 'consult', title: 'Check sample', target: 'hub.codex', evidence: sample, prompt: sample,
         }] };
       }
-      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(output) } }] }));
+      res.end(JSON.stringify({ model: 'fixture', usage: { prompt_tokens: 12, completion_tokens: 5 },
+        choices: [{ message: { content: JSON.stringify(output) } }] }));
     } catch (err) { res.writeHead(400); res.end(err.message); }
   });
   provider.listen(0, '127.0.0.1');
@@ -221,7 +223,12 @@ fs.writeFileSync(args[args.indexOf('-o') + 1], 'sample=ok');
   const worker = launch(env, 'worker', 'hub.codex');
   try {
     await poll(() => workerOnline(env, 'hub.codex'), worker);
-    await sendChat(env, hub, sample, finalAnswer);
+    const cookie = await sendChat(env, hub, sample, finalAnswer);
+    const board = await phoneApi(env)('board', {}, cookie);
+    const phases = (await board.json()).value.usage.byPhase;
+    for (const phase of ['chat', 'delivery']) {
+      assert.equal(phases.find(row => row.phase === phase)?.totalTokens, 17);
+    }
   } finally { await worker.stop(); await hub.stop(); }
 });
 
@@ -251,6 +258,8 @@ const option = key => args[args.indexOf(key) + 1];
 assert.equal(option('--profile'), 'headless');
 if (args.includes('--dump-config')) {
   console.log(['tool-files','session-persistence-jsonl','session-projection-cache','session-query-sqlite'].map(id => '- id: ' + id).join('\\n'));
+} else if (args.includes('--help')) {
+  console.log('  --json   emit newline-delimited events');
 } else {
   assert.equal(option('--permission-mode'), 'read-only');
   assert.equal(option('--approval-policy'), 'never');
@@ -261,7 +270,15 @@ if (args.includes('--dump-config')) {
     for (const id of ['tool-files','session-persistence-jsonl','session-projection-cache','session-query-sqlite']) {
       assert.equal(patch.find(r => r.id === id)?.disabled, true);
     }
-    console.log(JSON.stringify({reply: 'Synthetic hello.', actions: [], directBasis: 'conversation'}));
+    assert.ok(args.includes('--json'));
+    const emit = event => console.log(JSON.stringify(event));
+    emit({type: 'session', sessionId: 'fictional-greeting'});
+    emit({type: 'status', phase: 'step_start', turn: 0, step: 0});
+    emit({type: 'status', phase: 'step_end', turn: 0, step: 0, usage: {
+      inputTokens: 16, cacheReadTokens: 4, outputTokens: 6, totalTokens: 26
+    }});
+    emit({type: 'final', sessionId: 'fictional-greeting', reason: {kind: 'completed'},
+      text: JSON.stringify({reply: 'Synthetic hello.', actions: [], directBasis: 'conversation'})});
   } else {
     console.log(Buffer.byteLength(input));
   }
@@ -273,6 +290,10 @@ if (args.includes('--dump-config')) {
   const worker = launch(env, 'worker', 'hub.deepseek');
   try {
     await finishSample(env, worker, 'hub.deepseek');
-    await sendChat(env, hub, 'Hello', 'Synthetic hello.');
+    const cookie = await sendChat(env, hub, 'Hello', 'Synthetic hello.');
+    const board = await phoneApi(env)('board', {}, cookie);
+    const usage = (await board.json()).value.usage.allTime;
+    assert.deepEqual([usage.calls, usage.inputTokens, usage.outputTokens, usage.totalTokens, usage.cachedInputTokens],
+      [1, 20, 6, 26, 4]);
   } finally { await worker.stop(); await hub.stop(); }
 });

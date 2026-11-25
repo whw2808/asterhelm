@@ -161,6 +161,7 @@ dialog button { display:block; margin:0 0 10px auto; padding:7px 15px; border-ra
  .product-grid { grid-template-columns:1fr; gap:12px }
  .product-copy { max-width:none }
  .switch { margin:20px 0 13px }
+ .switch button { padding-inline:clamp(.65rem,3.5vw,1.2rem) }
  .view-copy { min-height:0 }
  .phone-stage { padding-top:17px }
  .device-screen { width:clamp(203px,64%,267px) }

@@ -135,3 +135,14 @@ export async function refreshOlderWork(page, transcript, fetchAround, current = 
     }
   }
 }
+
+const usageReportCount = { inputTokens: 'inputReportedCalls', outputTokens: 'outputReportedCalls',
+  totalTokens: 'totalReportedCalls', cachedInputTokens: 'cachedReportedCalls' };
+const usageNumber = new Intl.NumberFormat('zh-CN');
+
+export function usageTokenCount(bucket, field) {
+  if (bucket.calls === 0) return '0';
+  const reports = bucket[usageReportCount[field]];
+  if (!reports || !Number.isSafeInteger(bucket[field])) return '—';
+  return (reports < bucket.calls || bucket.incompleteCalls ? '≥' : '') + usageNumber.format(bucket[field]);
+}
