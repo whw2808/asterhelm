@@ -258,7 +258,7 @@ test('a stop can independently evidence status without sharing retired output or
   const store=new PersonalStore(':memory:');t.after(()=>store.db.close());
   const parent=order(store);
   step(store,parent,'digital','running');step(store,parent,'print','succeeded');
-  store.work.revise(parent,amendment,{...change,criteria:['Print proof','Confirm stopped assignment']});
+  store.work.revise(parent,amendment,{...change,criteria:['Print proof','Confirm stopped assignment','Report proof with status']});
   store.work.observe({id:'digital-task',state:'cancelled',workerState:'cancelled',cancelRequested:1,result:'DO NOT DELIVER'});
   const planner={plan:async input=>{
     assert.deepEqual(input.results.map(r=>r.id),['print-task']);
@@ -267,7 +267,8 @@ test('a stop can independently evidence status without sharing retired output or
     assert.equal(event.result,undefined);
     return {reply:'Print proof ready, digital stopped.',actions:[],coverage:[
       {index:0,status:'answered',finding:'Print proof ready',sources:['print-task']},
-      {index:1,status:'answered',finding:'Digital stopped',sources:[event.id],kind:'status'}]};
+      {index:1,status:'answered',finding:'Digital stopped',sources:[event.id],kind:'status'},
+      {index:2,status:'answered',finding:'Proof and stop verified',sources:['print-task',event.id]}]};
   }};
   await deliverWork({store,broker:async()=>[desk],planner});
   assert.equal(store.work.order(parent).state,'completed');
