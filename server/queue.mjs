@@ -23,7 +23,7 @@ export class Queue {
     this.registry=new Registry(this.db,localDeviceId);
     this.db.exec('BEGIN IMMEDIATE');
     try{
-      for(const field of ['startedAt','lastHeartbeatAt','finishedAt','progress']){
+      for(const field of ['startedAt','lastHeartbeatAt','finishedAt','progress','workerState']){
         if(!columns.includes(field))this.db.exec('ALTER TABLE tasks ADD COLUMN '+field+' TEXT');
       }
       if(!columns.includes('finishedAt'))this.db.exec("UPDATE tasks SET finishedAt=updated WHERE state IN ('succeeded','failed','interrupted','cancelled')");
@@ -47,7 +47,7 @@ export class Queue {
     return row?this.get(row.id):null;
   }
   cancelByRequestId(requestId) {
-    requireValue(typeof requestId==='string' && /^handoff:[^\s\u0000-\u001f]{1,152}$/.test(requestId),'Expected a handoff request ID');
+    requireValue(typeof requestId==='string' && requestId.length<=160 && /^(?:handoff|personal):[^\s\u0000-\u001f]+$/.test(requestId),'Expected an assignment request ID');
     this.db.exec('BEGIN IMMEDIATE');
     try{
       this.db.prepare('INSERT OR IGNORE INTO stopped_handoffs VALUES(?,?)').run(requestId,now());
@@ -140,8 +140,8 @@ export class Queue {
     try{
       if(bytes!==null)this.db.prepare('INSERT INTO task_artifacts VALUES(?,?,?,?)').run(id,bytes.length,attachment.sha256,bytes);
       const stamp=now();
-      this.db.prepare('UPDATE tasks SET state=?,result=?,workspace=?,updated=?,finishedAt=?,progress=NULL WHERE id=?')
-        .run(accepted,String(result).slice(0,128000),String(workspace).slice(0,1024),stamp,stamp,id);
+      this.db.prepare('UPDATE tasks SET state=?,workerState=?,result=?,workspace=?,updated=?,finishedAt=?,progress=NULL WHERE id=?')
+        .run(accepted,state,String(result).slice(0,128000),String(workspace).slice(0,1024),stamp,stamp,id);
       this.db.exec('COMMIT');
     }catch(e){this.db.exec('ROLLBACK');throw e;}
     return {ack:true};

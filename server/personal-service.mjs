@@ -7,6 +7,7 @@ import {pathToFileURL} from 'node:url';
 import {projectAliasesFor} from './registry.mjs';
 import {actor,mentions,forbidDelegation,requireConsult} from './router-policy.mjs';
 import {deliverWork} from './router-delivery.mjs';
+import {checkedRevision,acceptRevision,withdrawPausedSteps} from './work-steering.mjs';
 import {PersonalStore} from './personal-store.mjs';
 import {groupBoard} from './board-groups.mjs';
 import {findSharedWork} from './personal-opportunities.mjs';
@@ -68,9 +69,11 @@ export class PersonalAgent{
     const sessions=merge([...rich.filter(allowed).map(compact),...rows.slice(0,22).map(r=>({machine:r.machine,target:r.target??null,id:r.id,title:r.title,updatedAt:r.updatedAt,source:r.source,visibility:'metadata-only'}))]);
     const project=attached?.cwd || (followUp?prior[0]?.cwd:null) || null;
     const workId=work?.workId??null;
-    const activeWork=this.store.db.prepare(`SELECT w.id,m.text FROM work_orders w JOIN messages m ON m.id=w.id
-      LEFT JOIN continuity_turns c ON c.turnId=w.id WHERE w.state IN ('working','synthesizing')
-      AND (? IS NULL OR c.workId=?) ORDER BY m.seq DESC LIMIT 12`).all(workId,workId);
+    const activeWork=this.store.db.prepare(`SELECT w.id,m.text,w.goal,w.revision,w.state FROM work_orders w JOIN messages m ON m.id=w.id
+      LEFT JOIN continuity_turns c ON c.turnId=w.id WHERE w.state IN ('working','synthesizing','paused')
+      AND (? IS NULL OR c.workId=?) ORDER BY m.seq DESC LIMIT 20`).all(workId,workId)
+      .map(order=>({...order,tasks:this.store.work.card(order.id).tasks.map(({id,taskId,title,deviceName,agentName,target,state,scope})=>
+        ({id,taskId,title,deviceName,agentName,target,state,scope}))}));
     const catalog=workers.map(w=>{
       const {projectAliases,...device}=w;
       const scopedAliases=[...projectAliasesFor(w,project),...this.store.deviceAliases(w.deviceId,project)];
@@ -108,10 +111,17 @@ export class PersonalAgent{
     }
     const refs=(snap.attachedSession?.found?[snap.attachedSession,...(plan.references||[])]:plan.references||[]).map(r=>snap.sessions.find(s=>r?.id===s.id&&r.machine===s.machine)).filter(Boolean);
     const actions=[];
-    for(const a of plan.actions){
+    const edits=plan.actions.filter(a=>a?.type==='revise');
+    // A scoped amendment owns only its routing effects. Ignore the planner's
+    // incidental reminder bookkeeping without touching independent personal items.
+    const proposedActions=edits.length?plan.actions.filter(a=>!['close','review'].includes(a?.type)):plan.actions;
+    assert(edits.length<=1&&(!edits.length||proposedActions.every(a=>['revise','consult','dispatch'].includes(a?.type))),'一次变更需要明确一项工作及其新分工');
+    const revision=edits.length?checkedRevision(edits[0],snap.activeWork||[]):null;
+    for(const a of proposedActions){
       assert(a&&typeof a==='object'&&typeof a.evidence==='string'&&a.evidence.trim().length>=2&&turn.text.includes(a.evidence),'操作缺少来自你本条消息的依据');
       const text=clean(a.text,1500);
       switch(a.type){
+        case 'revise':actions.push(revision);break;
         case 'device_alias':{
           const alias=clean(a.alias,80),device=workers.find(w=>w.deviceId===a.deviceId);
           const scope=a.projectOnly?snap.project:'';
@@ -150,10 +160,13 @@ export class PersonalAgent{
           assert(worker.capabilities?.includes(mode),'执行端没有所需能力');
           assert(!forbidDelegation.test(turn.text),'当前消息要求直接解释或暂缓执行');
           assert(!write||(!noChanges.test(turn.text)&&explicitWrite.test(turn.text)),'本条消息没有允许创建或修改文件');
-          if(attached&&attached.machine!==worker.deviceId)assert(mentions(turn.text,worker),'所选会话与执行设备不一致');
+          if(attached&&attached.machine!==worker.deviceId){
+            const assigned=revision&&snap.activeWork.find(order=>order.id===revision.id)?.tasks.some(s=>s.target===worker.target);
+            assert(assigned||mentions(turn.text,worker),'所选会话与执行设备不一致');
+          }
           if(attached&&attached.machine===worker.deviceId&&sourceId)assert(attached.id===sourceId,'指定会话与所选会话不一致');
           const context=row?'\n来源会话，只读资料：'+JSON.stringify(compact(row)):'';
-          const objective='\n本次原问题：'+turn.text+'\n整项交付要求：'+JSON.stringify(criteria)+'\n请完成本次分工，结论区分已查实与推断，标注关键依据；允许材料不足，说明具体缺口。';
+          const objective='\n本次要求：'+(revision?.goal||turn.text)+'\n整项交付要求：'+JSON.stringify(revision?.criteria||criteria)+'\n请完成本次分工，结论区分已查实与推断，标注关键依据；允许材料不足，说明具体缺口。';
           actions.push({type:a.type,target:worker.target,actor:actor(worker),title:clean(a.title||prompt.split('\n')[0],90),
             prompt:prompt+objective+context,mode,notify:a.notify===true});break;
         }
@@ -169,7 +182,18 @@ export class PersonalAgent{
           assert(text&&due&&[0,1,7].includes(days),'复查规则缺少明确时间');
           actions.push({type:'review',text,dueAt:due,days});break;
         }
-        case 'cancel':assert(this.flows.ownedFirst(a.id)||this.store.waiting().some(x=>x.id===a.id)||snap.activeWork?.some(x=>x.id===a.id),'这项任务不属于当前助手或已结束');actions.push({type:a.type,id:a.id});break;
+        case 'cancel':{
+          const parent=snap.activeWork?.find(order=>order.id===a.id);
+          const child=snap.activeWork?.find(order=>order.tasks?.some(step=>step.id===a.id||step.taskId===a.id));
+          assert(!child,'部分分工调整必须使用 revise 并更新验收范围');
+          if((parent?.tasks?.filter(step=>step.scope==='active').length??0)>1){
+            assert(/整(?:项|个|单)|全部|所有|全停|\b(?:entire|whole|all|everything)\b/i.test(turn.text)&&
+              !/其他.{0,6}(?:照常|继续)|\b(?:except|keep)\b/i.test(turn.text),
+              '只有明确叫停整项工作才可以取消父任务。调整其中的分工请使用 revise，保留仍适用的步骤');
+          }
+          assert(parent||(!snap.work&&(this.flows.ownedFirst(a.id)||this.store.waiting().some(x=>x.id===a.id))),'这项任务不属于当前助手或已结束');
+          actions.push({type:a.type,id:a.id});break;
+        }
         default:throw Error('模型提出了当前版本不支持的操作');
       }
     }
@@ -179,6 +203,8 @@ export class PersonalAgent{
   async apply(turn,plan){
     const results=[];
     const work=this.store.work;
+    const revision=plan.actions.find(a=>a.type==='revise');
+    const parent=revision?.id||turn.id;
     const delegated=plan.actions.some(a=>['consult','dispatch','handoff'].includes(a.type));
     if(delegated && plan.actions.some(a=>(['consult','dispatch'].includes(a.type)&&!a.actor)||(a.type==='handoff'&&!a.firstActor))){
       const catalog=await this.broker('/workers');
@@ -188,30 +214,32 @@ export class PersonalAgent{
         else if(a.type==='consult'||a.type==='dispatch'){a.actor=resolve(a.target);a.title=a.title||clean(a.prompt,90);}
       }
     }
-    if(delegated)this.store.transact(()=>{
-      work.create(turn,plan.criteria||[turn.text]);
+    if(delegated||revision)this.store.transact(()=>{
+      if(revision)acceptRevision(this,turn,revision);
+      else work.create(turn,plan.criteria||[turn.text]);
       for(const [i,a] of plan.actions.entries()){
         const key=turn.id+':'+i;
         if(a.type==='handoff'){
-          work.stage(turn.id,key,a.firstActor,'dispatch',clean(a.first,90),a.notify);
-          work.stage(turn.id,key+':next',a.secondActor,'dispatch',clean(a.second,90),a.notify,true);
-        }else if(a.type==='consult'||a.type==='dispatch')work.stage(turn.id,key,a.actor,a.type,a.title,a.notify);
+          work.stage(parent,key,a.firstActor,'dispatch',clean(a.first,90),a.notify,false,'workspace-write');
+          work.stage(parent,key+':next',a.secondActor,'dispatch',clean(a.second,90),a.notify,true);
+        }else if(a.type==='consult'||a.type==='dispatch')work.stage(parent,key,a.actor,a.type,a.title,a.notify,false,a.mode);
       }
     });
+    if(revision)await withdrawPausedSteps(this,parent);
     for(const [i,a] of plan.actions.entries()){
       const old=this.store.effect(turn.id,i);
       if(old){
         results[i]=old.result;
         if(delegated&&['consult','dispatch','handoff'].includes(a.type)){
-          const key=turn.id+':'+i,step=work.evidence(turn.id).find(s=>s.id===key);
-          if(step&&!step.taskId){const task=await this.broker('/get',{id:old.result});this.store.transact(()=>{work.bind(key,task);this.store.track(task.id,turn,a.notify);});}
+          const key=turn.id+':'+i,step=work.evidence(parent).find(s=>s.id===key);
+          if(step&&!step.taskId){const task=await this.broker('/get',{id:old.result});this.store.transact(()=>{work.bind(key,task);this.store.track(task.id,{id:parent},a.notify);});}
         }
         continue;
       }
       if(a.type==='dispatch'||a.type==='consult'){
         const result=await this.broker('/submit',{...a,requestId:'personal:'+turn.id+':'+i});
         results[i]=result.id;
-        this.store.transact(()=>{work.bind(turn.id+':'+i,result);this.store.track(result.id,turn,a.notify);this.store.ackEffect(turn.id,i,result.id);});
+        this.store.transact(()=>{work.bind(turn.id+':'+i,result);this.store.track(result.id,{id:parent},a.notify);this.store.ackEffect(turn.id,i,result.id);});
       }else if(a.type==='handoff'){
         const first=await this.broker('/submit',{target:a.from,prompt:a.first,mode:'workspace-write',exportFile:true,requestId:'personal:'+turn.id+':'+i});
         results[i]=first.id;
@@ -255,7 +283,9 @@ export class PersonalAgent{
       }
       for(const r of plan.refs)this.store.link(turn,r);
       const text=[plan.reply,...receipts.filter(x=>!plan.reply.includes(x))].filter(Boolean).join('\n');
-      if(delegated){
+      if(revision){
+        this.store.finish(turn,'已更新这项工作的目标：'+revision.goal+'。执行端的回执见下方任务卡。');
+      }else if(delegated){
         if(receipts.length)this.store.message('ack-'+turn.id,'assistant',receipts.join('\n'),turn.id);
         this.store.db.prepare("UPDATE turns SET state='done',plan=NULL WHERE id=?").run(turn.id);
       }else this.store.finish(turn,text||'收到。');
@@ -275,18 +305,28 @@ export class PersonalAgent{
       let plan=turn.plan?JSON.parse(turn.plan):null;
       if(!plan){
         const snap=await this.snapshot(turn);
-        const proposed=await this.planner.plan(snap);
-        try{plan=this.check(turn,requireConsult(turn,snap,proposed),snap);}
-        catch(e){this.store.transact(()=>this.store.finish(turn,'我还没有执行这一步。'+e.message+'。请补充具体要求。'));return;}
+        let proposed=await this.planner.plan(snap);
+        const checked=proposal=>this.check(turn,requireConsult(turn,snap,proposal),snap);
+        try{
+          try{plan=checked(proposed);}
+          catch(error){
+            if(!snap.activeWork?.length||!proposed.actions?.some(a=>['cancel','revise'].includes(a?.type)))throw error;
+            proposed=await this.planner.plan({...snap,routingCorrection:error.message+'。按当前消息重新识别原工作及步骤，指代仍不明确就提问。'});
+            plan=checked(proposed);
+          }
+        }catch(e){this.store.transact(()=>this.store.finish(turn,'我还没有执行这一步。'+e.message+'。请补充具体要求。'));return;}
         this.store.savePlan(turn,plan);
       }
       await this.apply(turn,plan);
     }catch(err){
       if(turn.attempts>=2 && !this.store.db.prepare('SELECT plan FROM turns WHERE id=?').get(turn.id)?.plan){
         this.store.transact(()=>this.store.finish(turn,'这次没有取得可用的模型回复，已保存你的消息。可以发“再试一次”继续。'));
+      }else if(/工作范围已变化或工作已结束|步骤不属于当前工作范围/.test(err.message||'')){
+        this.store.transact(()=>this.store.finish(turn,'这项工作的状态已变化。这次调整没有生效，请查看最新任务卡后再指定分工。'));
       }else if(turn.attempts>=4 && /Unsupported|Unknown worker|not support|Request ID already used|Unknown task|tombstone|cancelled before|Input task|attachment|artifact|handoff has been cancelled/i.test(err.message||'')){
         this.store.transact(()=>{
-          for(const step of this.store.work.evidence(turn.id))if(!step.taskId)this.store.work.stopUnsubmitted(step.id,'interrupted','派单未能提交');
+          const parent=this.store.db.prepare('SELECT parent FROM work_revisions WHERE turnId=?').get(turn.id)?.parent??turn.id;
+          for(const step of this.store.work.evidence(parent))if(!step.taskId&&step.id.startsWith(turn.id+':'))this.store.work.stopUnsubmitted(step.id,'interrupted','派单未能提交');
           this.store.finish(turn,'有一步派单未能继续，先前已接单的任务会继续回报。',true);
         });
       }else this.store.defer(turn);

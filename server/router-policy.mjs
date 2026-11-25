@@ -22,6 +22,7 @@ function namedAgents(text,workers){
 }
 export function requireConsult(turn,snap,plan){
   if(forbidDelegation.test(turn.text))return plan;
+  if(plan.actions.some(a=>a?.type==='revise'&&snap.activeWork?.some(order=>order.id===a.id)))return plan;
   const physical=snap.workers||[];
   const explicit=namedAgents(turn.text,physical);
   const requestedDevices=new Set(explicit.map(w=>w.deviceId));

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ChatBinding } from './mobile-work.mjs';
+import { ChatBinding, mergeWorkHistory, refreshOlderWork } from './mobile-work.mjs';
 
 const alpha = { machine: 'studio', id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', title: 'Atlas' };
 const beta = { machine: 'lab', id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', title: 'Birch' };
@@ -61,4 +61,41 @@ test('explicit selection recovers a matching unsent legacy native message with i
   binding.select(null);
   assert.equal(binding.restoreText(null, recovered), '');
   assert.equal(binding.restoreText({ text: 'New topic' }, recovered), 'New topic');
+});
+
+test('the latest amendment owns one current work card even when older history arrives afterward', () => {
+  const work = { id: 'work-iris', revision: 1, goal: 'Review the introduction', state: 'working',
+    updatedAt: '2026-01-01T00:01:00Z', tasks: [] };
+  const reply = { id: 'amended', seq: 90, role: 'assistant', text: 'Updated', work };
+  const previousPage = [{ id: 'work-iris', seq: 1, role: 'user', text: 'Review the draft',
+    work: { ...work, revision: 0, goal: 'Review the draft' } }];
+  const merged = mergeWorkHistory([reply], previousPage);
+  assert.deepEqual(merged.map(message => [message.id, message.work?.goal]), [
+    ['work-iris', undefined], ['amended', 'Review the introduction'],
+  ]);
+  const settled = { ...work, state: 'completed', updatedAt: '2026-01-01T00:02:00Z' };
+  const refreshed = mergeWorkHistory(merged, [{ ...previousPage[0], work: settled }]);
+  assert.equal(refreshed[1].work.state, 'completed');
+  assert.equal(mergeWorkHistory(refreshed, [reply])[1].work.state, 'completed');
+});
+
+test('polling an older card continues until a paused step has its execution receipt', async () => {
+  const paused = id => ({ id, state: 'paused', tasks: [{ state: 'running', scope: 'paused' }] });
+  const older = [
+    { id: 'draft', work: paused('draft') },
+    { id: 'revision', work: paused('atlas') },
+    { id: 'resolved', work: { ...paused('resolved'), tasks: [{ state: 'cancelled', scope: 'paused' }] } },
+  ];
+  const page = { messages: [{ id: 'amended-draft', work: paused('draft') }], pending: 0 };
+  const requests = [];
+  await refreshOlderWork(page, older, async id => {
+    requests.push(id);
+    return { messages: [{ id, work: { ...paused('atlas'), tasks: [{ state: 'cancelled', scope: 'paused' }] } }] };
+  });
+  assert.deepEqual(requests, ['revision']);
+  assert.deepEqual(page.messages.map(message => message.id), ['amended-draft', 'revision']);
+  requests.length = 0;
+  const updated = mergeWorkHistory(older, page.messages);
+  await refreshOlderWork({ messages: [page.messages[0]] }, updated, id => requests.push(id));
+  assert.deepEqual(requests, []);
 });

@@ -250,7 +250,7 @@ const args = process.argv.slice(2);
 const option = key => args[args.indexOf(key) + 1];
 assert.equal(option('--profile'), 'headless');
 if (args.includes('--dump-config')) {
-  console.log('- id: tool-files');
+  console.log(['tool-files','session-persistence-jsonl','session-projection-cache','session-query-sqlite'].map(id => '- id: ' + id).join('\\n'));
 } else {
   assert.equal(option('--permission-mode'), 'read-only');
   assert.equal(option('--approval-policy'), 'never');
@@ -258,7 +258,9 @@ if (args.includes('--dump-config')) {
   assert.equal(patch.find(r => r.id === 'agent-default-model').config.model, 'test-model');
   const input = fs.readFileSync(0, 'utf8');
   if (patch.some(r => r.id === 'system-prompt')) {
-    assert.equal(patch.find(r => r.id === 'tool-files').disabled, true);
+    for (const id of ['tool-files','session-persistence-jsonl','session-projection-cache','session-query-sqlite']) {
+      assert.equal(patch.find(r => r.id === id)?.disabled, true);
+    }
     console.log(JSON.stringify({reply: 'Synthetic hello.', actions: [], directBasis: 'conversation'}));
   } else {
     console.log(Buffer.byteLength(input));
