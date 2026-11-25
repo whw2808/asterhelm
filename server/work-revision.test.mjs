@@ -253,3 +253,35 @@ test('a late bind replaces an unsubmitted-stop assumption with the actual worker
     assert.match(child.progress,/等待执行端确认/);
   }finally{store.db.close();}
 });
+
+test('a stop can independently evidence status without sharing retired output or becoming a deliverable',async t=>{
+  const store=new PersonalStore(':memory:');t.after(()=>store.db.close());
+  const parent=order(store);
+  step(store,parent,'digital','running');step(store,parent,'print','succeeded');
+  store.work.revise(parent,amendment,{...change,criteria:['Print proof','Confirm stopped assignment']});
+  store.work.observe({id:'digital-task',state:'cancelled',workerState:'cancelled',cancelRequested:1,result:'DO NOT DELIVER'});
+  const planner={plan:async input=>{
+    assert.deepEqual(input.results.map(r=>r.id),['print-task']);
+    const [event]=input.scopeReceipts;
+    assert.equal(event.workerConfirmedStop,true);
+    assert.equal(event.result,undefined);
+    return {reply:'Print proof ready, digital stopped.',actions:[],coverage:[
+      {index:0,status:'answered',finding:'Print proof ready',sources:['print-task']},
+      {index:1,status:'answered',finding:'Digital stopped',sources:[event.id],kind:'status'}]};
+  }};
+  await deliverWork({store,broker:async()=>[desk],planner});
+  assert.equal(store.work.order(parent).state,'completed');
+});
+
+test('a status receipt cannot satisfy a content requirement',async t=>{
+  const store=new PersonalStore(':memory:');t.after(()=>store.db.close());
+  const parent=order(store);
+  step(store,parent,'digital','running');step(store,parent,'print','succeeded');
+  store.work.revise(parent,amendment,change);
+  store.work.observe({id:'digital-task',state:'cancelled',workerState:'cancelled',cancelRequested:1});
+  await deliverWork({store,broker:async()=>[desk],planner:{plan:async({scopeReceipts})=>({
+    reply:'Missing print evidence.',actions:[],coverage:[
+      {index:0,status:'answered',finding:'Missing print evidence.',sources:[scopeReceipts[0].id]}],
+  })}});
+  assert.equal(store.work.order(parent).state,'partial');
+});
