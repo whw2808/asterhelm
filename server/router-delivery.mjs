@@ -32,10 +32,12 @@ function reviewCoverage(criteria,coverage,results,scopeReceipts){
     const row=coverage.find(r=>r.index===index);
     if(!row||!['answered','missing'].includes(row.status)||!row.finding?.trim())throw Error('Invalid coverage row');
     const sources=Array.isArray(row.sources)?row.sources:[];
-    const receipts=row.kind==='status'?scopeReceipts:[];
-    const verified=id=>results.some(r=>r.id===id&&r.state==='succeeded'&&r.result)||receipts.some(r=>r.id===id&&r.finishedAt);
-    const supported=sources.length>0&&sources.every(verified);
-    return {item,finding:row.finding.trim(),sources:sources.filter(id=>results.some(r=>r.id===id)||receipts.some(r=>r.id===id)),answered:row.status==='answered'&&supported};
+    const produced=id=>results.some(r=>r.id===id&&r.state==='succeeded'&&r.result);
+    const verified=id=>produced(id)||scopeReceipts.some(r=>r.id===id&&r.finishedAt);
+    // A combined finding can cite the deliverable and a stop. A receipt alone
+    // proves only a status finding, never the requested output.
+    const supported=sources.length>0&&sources.every(verified)&&(row.kind==='status'||sources.some(produced));
+    return {item,finding:row.finding.trim(),sources:sources.filter(id=>results.some(r=>r.id===id)||scopeReceipts.some(r=>r.id===id)),answered:row.status==='answered'&&supported};
   });
 }
 function eligibleWorkers(workers,steps,revision){
