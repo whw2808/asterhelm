@@ -16,6 +16,7 @@ import {ProactiveCandidates} from './proactive-candidates.mjs';
 import {WakeRules} from './wake-rules.mjs';
 import {WorkWake} from './work-wake.mjs';
 import {cardChoice} from './proactive-chat.mjs';
+import {TokenUsage,isUsageQuestion,usageAnswer} from './token-usage.mjs';
 import {selectPlanner} from './personal-model.mjs';
 import {home,call} from './control.mjs';
 
@@ -40,7 +41,8 @@ function plausibleDate(value){
 function assert(ok,msg){if(!ok)throw Error(msg);}
 export class PersonalAgent{
   constructor({store,planner,contexts,broker=call}){
-    this.store=store;this.flows=new Flows(store);this.planner=planner;this.contexts=contexts;this.broker=broker;
+    this.usage=new TokenUsage(store.db);
+    this.store=store;this.flows=new Flows(store);this.planner=this.usage.wrap(planner);this.contexts=contexts;this.broker=broker;
     this.candidates=new ProactiveCandidates(store);this.rules=new WakeRules(store);this.workWake=new WorkWake(store);
     this.observedRows=[];this.rowsAvailable=false;
     this.processing=false;this.checking=false;this.lastObservation=0;
@@ -57,6 +59,13 @@ export class PersonalAgent{
     return result;
   }
   async receive(input){
+    if(isUsageQuestion(input.text)){
+      // Account-wide totals belong to the paired user's chat. This query also works offline.
+      return this.store.receive({...input,context:null,workId:null},null,turn=>{
+        this.store.finish(turn,usageAnswer(this.usage.summary()));
+        return {id:turn.id};
+      });
+    }
     const inspect=typeof input.text==='string'&&/^(?:星舵操作|可以|同意|好|批准|立项|把这件事|开始这件工作|忽略|再查|再核对|暂停|恢复|取消|停止)/.test(input.text.trim());
     const cards=inspect?this.proactiveCards():[];
     const recent=this.store.db.prepare('SELECT id FROM messages ORDER BY seq DESC LIMIT 1').get();
@@ -97,7 +106,7 @@ export class PersonalAgent{
       optional(()=>this.broker('/workers'),[]),optional(()=>this.broker('/list'),[]),
       this.contextRows('',500),this.contexts.contextCoverage(home)]);
     const rows={workers,tasks:this.store.visibleTasks(tasks),sessions:sessions.map(({evidence,...s})=>s),coverage};
-    return {...(layout==='machines'?groupBoard(rows):rows),coverage,
+    return {...(layout==='machines'?groupBoard(rows):rows),coverage,usage:this.usage.summary(),
       preferences:this.store.preferences(),commitments:this.store.openItems().concat(this.flows.listReviews()),watches:this.store.watchers().map(({id,text,machine,sessionId})=>({id,text,machine,sessionId}))};
   }
   async snapshot(turn) {
@@ -500,6 +509,6 @@ async function start(){
   if(!planner.offline)setInterval(()=>pass(()=>agent.step()),700);
   setInterval(()=>pass(()=>agent.tick()),2500);
   if(!planner.offline)setInterval(()=>pass(()=>agent.deliver()),1100);
-  if(!planner.offline)setInterval(()=>pass(()=>agent.workWake.advance({planner,broker:agent.broker})),5000);
+  if(!planner.offline)setInterval(()=>pass(()=>agent.workWake.advance({planner:agent.planner,broker:agent.broker})),5000);
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)await start();

@@ -71,7 +71,7 @@ export class Flows {
     if(!event)return;
     try{
       const snap=await context(event);
-      const result=await planner.plan({...snap,currentUser:'这是已登记的到期复查：“'+event.text+'”。根据提供的最新上下文做一次简明汇报。只分析现有状态，actions 必须为空。若此规则要求仅在异常或有变化时联系，且没有支持该条件的证据，请仅回复 NO_UPDATE。'});
+      const result=await planner.plan({...snap,currentUser:'这是已登记的到期复查：“'+event.text+'”。根据提供的最新上下文做一次简明汇报。只分析现有状态，actions 必须为空。若此规则要求仅在异常或有变化时联系，且没有支持该条件的证据，请仅回复 NO_UPDATE。'},{phase:'review'});
       if(!result.reply)throw Error('Empty review');
       this.store.transact(()=>{
         const fresh=this.db.prepare('SELECT state FROM review_events WHERE id=?').get(event.id);

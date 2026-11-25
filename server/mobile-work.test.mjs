@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ChatBinding, cardRequest, chatDisplayText, mergeWorkHistory, refreshOlderWork } from './mobile-work.mjs';
+import { ChatBinding, cardRequest, chatDisplayText, mergeWorkHistory, refreshOlderWork, usageTokenCount } from './mobile-work.mjs';
 
 const alpha = { machine: 'studio', id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', title: 'Atlas' };
 const beta = { machine: 'lab', id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', title: 'Birch' };
@@ -179,4 +179,25 @@ test('reading earlier history cannot replace a fresher next wake on the same unc
   const current = mergeWorkHistory([older], [refreshed]);
   assert.deepEqual(current[0].work, refreshed.work);
   assert.deepEqual(mergeWorkHistory(current, [older], true)[0].work, refreshed.work);
+});
+
+test('board token counts distinguish an idle period, reported zero, missing fields and partial totals', () => {
+  const bucket = { calls: 3, reportedCalls: 2, totalReportedCalls: 2, unknownCalls: 1, partialCalls: 1,
+    inputTokens: 1400, outputTokens: 0, totalTokens: 1800, cachedInputTokens: 0,
+    inputReportedCalls: 1, outputReportedCalls: 1, cachedReportedCalls: 0 };
+  assert.equal(usageTokenCount(bucket, 'totalTokens'), '≥1,800');
+  assert.equal(usageTokenCount(bucket, 'inputTokens'), '≥1,400');
+  assert.equal(usageTokenCount(bucket, 'outputTokens'), '≥0');
+  assert.equal(usageTokenCount(bucket, 'cachedInputTokens'), '—');
+  assert.equal(usageTokenCount({ ...bucket, calls: 1, outputReportedCalls: 1 }, 'outputTokens'), '0');
+  assert.equal(usageTokenCount({ calls: 0, totalTokens: 0, totalReportedCalls: 0 }, 'totalTokens'), '0');
+  assert.equal(usageTokenCount({ calls: 2, totalTokens: 0, totalReportedCalls: 0 }, 'totalTokens'), '—');
+});
+
+test('a partial multi-step receipt retains its measured input, output and total as lower bounds', () => {
+  const bucket = { calls: 1, reportedCalls: 0, totalReportedCalls: 1, unknownCalls: 1, incompleteCalls: 1,
+    inputReportedCalls: 1, outputReportedCalls: 1, inputTokens: 30, outputTokens: 7, totalTokens: 37 };
+  assert.equal(usageTokenCount(bucket, 'totalTokens'), '≥37');
+  assert.equal(usageTokenCount(bucket, 'inputTokens'), '≥30');
+  assert.equal(usageTokenCount(bucket, 'outputTokens'), '≥7');
 });

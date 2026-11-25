@@ -179,6 +179,12 @@ Stop all processes before making a consistent filesystem backup of `ASTERHELM_HO
 
 To exercise setup and enrollment on a development machine, run `node --test scripts/self-host.test.mjs`. It runs disposable services on loopback, generates a temporary test CA, and discards the state at the end. The suite exercises the first-run byte count over the local socket and mTLS, phone pairing, the board and logout. A synthetic HTTPS model endpoint dispatches a read-only task to a stand-in native executor and checks that its receipt reaches the conversation. A stand-in headless harness also checks DeepSeek worker configuration and the planner’s tool-disabling patch. The suite needs no external model or phone.
 
+### Check the coordinator’s token usage
+
+Open **看板 → Token 用量** or ask “星舵今天用了多少 token？” in the paired chat. The service counts model calls for conversation planning, delivery, autonomous work checks and scheduled reviews. The reporting day starts at midnight in the coordinator host’s local time zone. Reading the meter uses the local SQLite ledger and makes no model request.
+
+Counting begins when the upgraded coordinator starts. Existing chat history and worker receipts contain no reliable token totals for earlier use. The ledger stores call time, phase, model when available and token counts. It uses provider-reported usage, includes cached input once within input, and flags missing or partial reports. For DeepSeek Harness, the headless CLI must advertise `--json` and report usage in its `step_end` events to populate the meter. Plaintext-only versions can still answer and their calls appear as unreported. Worker inference and independent desktop conversations fall outside this meter. Pairing and chat history carry over when upgrading the server and installed Android client.
+
 ### Change a job from the main conversation
 
 Send the original request and any change of scope in the same phone conversation. For example, a catalog can have a print assignment and a digital assignment. Sending “Pause the digital edition and continue the print edition” updates the goal and acceptance criteria on the existing work order. Its card shows the responsible device and agent, elapsed time, and whether a withdrawal is pending, the worker confirmed a stop, or the task was withdrawn before pickup. Each parallel worker receives its own assignment. The router can cite a stopped assignment’s receipt when reporting its status. A late digital result is excluded from the revised delivery.
