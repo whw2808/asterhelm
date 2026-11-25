@@ -1,6 +1,7 @@
 import path from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import {excerpt,maxEvidence,idPattern} from './context-format.mjs';
+import {desktopSyncTurns,visibleAgentMessage} from './context-agent-message.mjs';
 
 function open(root,file){
   const db=new DatabaseSync(path.join(root,file),{readOnly:true,timeout:2500,enableDoubleQuotedStringLiterals:false});
@@ -8,21 +9,25 @@ function open(root,file){
 }
 function iso(ms){return new Date(Number(ms)).toISOString();}
 
-export function scanDesktop(codexHome){
+export function scanDesktop(codexHome,includedDesktopThreadIds=[]){
+  if(!Array.isArray(includedDesktopThreadIds)||includedDesktopThreadIds.length>250||
+    includedDesktopThreadIds.some(id=>typeof id!=='string'||!idPattern.test(id)))throw Error('Invalid desktop thread selection');
   const meta=open(codexHome,'state_5.sqlite');
   let history;
   try{
     history=open(codexHome,'thread_history_1.sqlite');
-    const selection=`thread_source='user' AND (
+    const explicit=includedDesktopThreadIds.length?" OR (thread_source='agent_created_thread' AND source='vscode' AND id IN ("+includedDesktopThreadIds.map(()=>'?').join(',')+"))":'';
+    const selection=`(thread_source='user'${explicit}) AND (
        (source='vscode' AND (originator IS NULL OR originator IN ('Codex Desktop','codex_work_desktop'))) OR
        (source='cli' AND originator='codex-tui'))`;
-    const identities=meta.prepare('SELECT COUNT(DISTINCT creator_account_id) AS accounts,COUNT(DISTINCT creator_user_id) AS users FROM threads WHERE '+selection).get();
+    const identities=meta.prepare('SELECT COUNT(DISTINCT creator_account_id) AS accounts,COUNT(DISTINCT creator_user_id) AS users FROM threads WHERE '+selection).get(...includedDesktopThreadIds);
     if(identities.accounts>1||identities.users>1)throw Error('Desktop history contains multiple account identities');
-    const threads=meta.prepare('SELECT id,source,name,title,cwd,created_at_ms,updated_at_ms,created_at,updated_at,archived FROM threads WHERE '+selection+' ORDER BY id').all();
+    const threads=meta.prepare('SELECT id,source,name,title,cwd,created_at_ms,updated_at_ms,created_at,updated_at,archived FROM threads WHERE '+selection+' ORDER BY id').all(...includedDesktopThreadIds);
     const recent=history.prepare(`SELECT item_type,item_json,turn_id,item_id,created_at_ms FROM thread_items
       WHERE thread_id=? AND item_type IN ('userMessage','agentMessage') AND length(item_json)<250000
       ORDER BY rollout_ordinal DESC LIMIT 120`);
     const turn=history.prepare('SELECT status FROM thread_turns WHERE thread_id=? ORDER BY rollout_ordinal DESC LIMIT 1');
+    const syncTurn=desktopSyncTurns(history);
     return threads.filter(t=>idPattern.test(t.id)).map(t=>{
       const evidence=[];
       for(const item of recent.iterate(t.id)){
@@ -30,11 +35,11 @@ export function scanDesktop(codexHome){
         let role,text;
         if(item.item_type==='userMessage' && data.type==='userMessage'){
           role='user';text=data.content?.filter(p=>p.type==='text').map(p=>p.text).join(' ');
-        }else if(item.item_type==='agentMessage' && data.type==='agentMessage' && (!data.phase||data.phase==='final_answer')){
+        }else if(item.item_type==='agentMessage' && visibleAgentMessage(data)){
           role='assistant';text=data.text;
         }
         const visible=excerpt(text,700);
-        if(!visible || !item.turn_id || !item.item_id || !item.created_at_ms)continue;
+        if(!visible || !item.turn_id || !item.item_id || !item.created_at_ms || syncTurn(t.id,item.turn_id))continue;
         evidence.unshift({role,text:visible,at:iso(item.created_at_ms),turnId:item.turn_id,itemId:item.item_id});
         if(evidence.length===maxEvidence)break;
       }

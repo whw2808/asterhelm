@@ -1,3 +1,5 @@
+import {WorkReadTickets} from './work-read-tickets.mjs';
+import {desktopBackfill,desktopHasBackfill} from './desktop-backfill.mjs';
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -33,6 +35,11 @@ export class PersonalAgent{
     this.processing=false;this.checking=false;this.lastObservation=0;
   }
   async contextRows(query,limit=20){return await this.contexts.readContexts(home,{query,limit});}
+  async exactSession({machine,id}){
+    if(typeof machine!=='string'||typeof id!=='string')return null;
+    if(this.contexts.readSession)return this.contexts.readSession(home,machine,id);
+    return (await this.contextRows(id,5)).find(row=>row.machine===machine&&row.id===id)??null;
+  }
   async board({layout}={}){
     const [workers,tasks,sessions,coverage]=await Promise.all([
       optional(()=>this.broker('/workers'),[]),optional(()=>this.broker('/list'),[]),
@@ -43,30 +50,53 @@ export class PersonalAgent{
   }
   async snapshot(turn) {
     const source=this.store.sourceFor(turn.id);
-    const attached=source?(await this.contextRows(source.id,5)).find(r=>r.id===source.id&&r.machine===source.machine):null;
+    const attached=source?await this.exactSession(source):null;
+    const work=this.store.continuity.recentForTurn(turn.id);
+    const participants=work?this.store.continuity.participants(work.workId):null;
+    const allowed=row=>!participants||participants.some(p=>p.machine===row.machine&&p.id===row.id&&p.target===(row.target??''));
     const [latest,matches,links,coverage,workers,queue]=await Promise.all([
-      this.contextRows('',12),this.contextRows(turn.text,12),
-      Promise.all(this.store.lastLinks().map(async l=> (await this.contextRows(l.id,4)).find(s=>s.machine===l.machine))),
-      this.contexts.contextCoverage(home),optional(()=>this.broker('/workers'),[]),optional(()=>this.broker('/list'),[])]);
-    const rows=merge([attached,...matches,...links,...latest]);
+      work?[]:this.contextRows('',12),work?[]:this.contextRows(turn.text,12),
+      Promise.all((participants??this.store.lastLinks()).map(p=>this.exactSession(p))),
+      work?[]:this.contexts.contextCoverage(home),optional(()=>this.broker('/workers'),[]),optional(()=>this.broker('/list'),[])]);
+    const rows=merge([attached,...matches,...links,...latest]).filter(allowed);
     const related=/会话|电脑|机器|工作|项目|进展|上次|之前|上回|昨天|最近|接着|继续|刚才|刚刚|做什么|在做|结果|分析|桌面|那批|这批|任务|比较|差异|分析|查证|session|project|machine|resume|thread/i.test(turn.text);
     const recent=new Map();
     for(const r of latest){if(!recent.has(r.machine))recent.set(r.machine,r);}
-    const prior=links.filter(Boolean);
+    const prior=links.filter(r=>r&&allowed(r));
     const followUp=prior.length&&turn.text.length<=120&&/它|这个|接着|接上|还有|为什么|怎么|然后|具体|后来|那|继续|这个|它|that|why|next/i.test(turn.text);
     const rich=attached||related||followUp?merge([attached,...matches.slice(0,4),...prior,...recent.values()]).slice(0,7):[];
-    const sessions=merge([...rich.map(compact),...rows.slice(0,22).map(r=>({machine:r.machine,target:r.target??null,id:r.id,title:r.title,updatedAt:r.updatedAt,source:r.source,visibility:'metadata-only'}))]);
+    const sessions=merge([...rich.filter(allowed).map(compact),...rows.slice(0,22).map(r=>({machine:r.machine,target:r.target??null,id:r.id,title:r.title,updatedAt:r.updatedAt,source:r.source,visibility:'metadata-only'}))]);
     const project=attached?.cwd || (followUp?prior[0]?.cwd:null) || null;
-    const activeWork=this.store.db.prepare("SELECT w.id,m.text FROM work_orders w JOIN messages m ON m.id=w.id WHERE w.state IN ('working','synthesizing') ORDER BY m.seq DESC LIMIT 12").all();
+    const workId=work?.workId??null;
+    const activeWork=this.store.db.prepare(`SELECT w.id,m.text FROM work_orders w JOIN messages m ON m.id=w.id
+      LEFT JOIN continuity_turns c ON c.turnId=w.id WHERE w.state IN ('working','synthesizing')
+      AND (? IS NULL OR c.workId=?) ORDER BY m.seq DESC LIMIT 12`).all(workId,workId);
     const catalog=workers.map(w=>{
       const {projectAliases,...device}=w;
       const scopedAliases=[...projectAliasesFor(w,project),...this.store.deviceAliases(w.deviceId,project)];
       return {...device,scopedAliases,deviceAliases:[...new Set([...(w.deviceAliases||[]),...scopedAliases])]};
     });
-    return {project,activeWork,attachedSession:source?{...source,found:!!attached}:null,now:new Date().toISOString(),timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,currentUser:turn.text,
-      preferences:this.store.preferences().slice(0,120),commitments:this.store.openItems().concat(this.flows.listReviews()).slice(0,100),
-      history:this.store.previous(turn.seq),sessions,coverage,workers:catalog,
-      lastMentioned:this.store.lastLinks(),tasks:this.store.visibleTasks(queue).slice(0,22)};
+    const inScope=work?new Set(this.store.db.prepare(`SELECT a.id FROM assignments a
+      JOIN continuity_turns c ON a.turnId=c.turnId WHERE c.workId=?`).all(workId).map(a=>a.id)):null;
+    let preferences,commitments;
+    if(work){
+      const owned='source IN (SELECT turnId FROM continuity_turns WHERE workId=?)';
+      preferences=this.store.db.prepare(`SELECT id,key,text,scope,updatedAt FROM prefs
+        WHERE scope='global' OR ${owned} ORDER BY updatedAt DESC LIMIT 120`).all(workId);
+      const reminders=this.store.db.prepare(`SELECT id,text,status,dueAt,intervalDays FROM commitments
+        WHERE status='open' AND ${owned} AND source NOT IN (SELECT id FROM diagnostics WHERE kind='turn') ORDER BY createdAt DESC LIMIT 100`).all(workId);
+      const reviews=this.store.db.prepare(`SELECT id,text,dueAt,intervalDays,'定期复查' AS status FROM reviews
+        WHERE active=1 AND ${owned} ORDER BY dueAt LIMIT 100`).all(workId);
+      const observation=this.store.db.prepare("SELECT id,text,status,machine,sessionId,sourceTime,reason FROM observed WHERE machine=? AND sessionId=? AND status='observed'");
+      commitments=reminders.concat(rows.flatMap(row=>observation.all(row.machine,row.id)),reviews);
+    }else{
+      preferences=this.store.preferences();
+      commitments=this.store.openItems().concat(this.flows.listReviews());
+    }
+    return {project,work,activeWork,attachedSession:source?{...source,found:!!attached}:null,now:new Date().toISOString(),timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,currentUser:turn.text,
+      preferences:preferences.slice(0,120),commitments:commitments.slice(0,100),
+      history:this.store.previous(turn.seq,turn.id),sessions,coverage,workers:catalog,
+      lastMentioned:participants??this.store.lastLinks(),tasks:this.store.visibleTasks(queue).filter(t=>!inScope||inScope.has(t.id)).slice(0,22)};
   }
   check(turn,plan,snap){
     const workers=snap.workers||[];
@@ -276,6 +306,9 @@ export class PersonalAgent{
       if(Date.now()-this.lastObservation>=30000){
         const rows=await this.contextRows('',500);
         this.store.observeSessions(rows);
+        const known=new Map(rows.map(row=>[row.machine+'|'+row.id,row]));
+        const visible=await Promise.all(this.store.continuity.participants().map(p=>known.get(p.machine+'|'+p.id)??this.exactSession(p)));
+        this.store.continuity.observeDesktop(visible.filter(row=>row&&!desktopHasBackfill(this.store,row)));
         const stamp=Date.now();
         const db=this.store.db;
         db.prepare("INSERT OR IGNORE INTO settings VALUES('overlapSince',?)").run(String(stamp));
@@ -308,6 +341,7 @@ async function start(){
   const contexts=await import('./context-read.mjs');
   const store=new PersonalStore(path.join(home,'personal.sqlite')),planner=selectPlanner(home);
   const agent=new PersonalAgent({store,planner,contexts});
+  const grants=new WorkReadTickets();
   const socket=path.join(home,'personal.sock');
   fs.rmSync(socket,{force:true});
   const server=http.createServer(async(req,res)=>{
@@ -320,8 +354,25 @@ async function start(){
       switch(req.url){
         case '/chat':
           if(planner.offline)throw Error('聊天模型尚未启用。请在服务器配置模型并重启助手。');
-          if(input.context&&!(await agent.contextRows(input.context.id,5)).some(r=>r.id===input.context.id&&r.machine===input.context.machine))throw Error('当前索引里找不到所选会话');
-          value=store.receive(input);break;
+          {
+            const row=input.context ? await agent.exactSession(input.context) : null;
+            if(input.context&&!row)throw Error('当前索引里找不到所选会话');
+            value=store.receive(input,row);break;
+          }
+        case '/contexts/desktopCursors':
+        case '/contexts/desktopPage':value=desktopBackfill(store,req.url,input);break;
+        case '/contexts/redeem':
+        case '/contexts/catchUp':{
+          const lookup=req.url==='/contexts/catchUp';
+          const threadId=lookup?input.threadId:grants.resolve(input.machine,input.target,input.ticket);
+          const items=threadId?store.continuity.catchUp(input.machine,input.target,threadId):[];
+          const work=items.find(item=>item.threadId===threadId)??null;
+          value={work};
+          if(work&&lookup)value.ticket=grants.issue(input.machine,input.target,threadId);
+          break;
+        }
+        case '/contexts/updates':value=store.continuity.pending(input.machine,input.target);break;
+        case '/contexts/ack':value={acknowledged:store.continuity.ack(input.machine,input,input.target)};break;
         case '/board':value=await agent.board(input);break;
         case '/history':value=store.history(input);break;
         case '/notifications':value=store.notifications(input);break;

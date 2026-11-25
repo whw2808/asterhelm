@@ -27,6 +27,10 @@ The first build generates a per-developer debug signing identity under `$ANDROID
 
 Install the debug APK on your Android device. If you use Android SDK Platform-Tools and have USB debugging enabled, run `adb install -r android/build/asterhelm-debug.apk`. On the server, run `node scripts/asterhelm.mjs pair` from the repository root to generate a single-use invitation. Open the link on the phone and choose Asterhelm, or paste the link into the app's pairing screen. Confirm the connection, then choose whether to enable background reminders.
 
+On the board, open a desktop session and choose **接着聊**. Messages keep using this session across app restarts. After the first message is accepted, choose **加入当前工作** on a different session to include it in that work when you send your next message. Choosing **接着聊** on the other session opens its own work. **退出接续** returns the composer to general chat. The delivery label below a message shows whether its update has reached the desktop.
+
+Install the updated APK over the previous version with the same signing identity and server origin to keep the existing pairing. If a message was pending in the previous version, selecting its original session restores the text for retry.
+
 The interface loads from assets bundled in the APK. Only native HTTPS requests contact the configured Asterhelm server. When enabled, reminders use a foreground service with a visible notification and a periodic catch-up job.
 
 ## Run checks

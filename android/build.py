@@ -24,6 +24,7 @@ ASSETS = {
     "mobile.html": "index.html",
     "mobile.css": "app.css",
     "mobile.js": "app.js",
+    "mobile-work.mjs": "mobile-work.mjs",
     "mobile-marked.mjs": "mobile-marked.mjs",
     "agent-codex.png": "agent-codex.png",
     "agent-deepseek.png": "agent-deepseek.png",

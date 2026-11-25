@@ -52,6 +52,26 @@ test('only visible top-level desktop dialogue enters the snapshot with source ev
   assert.equal(rows.find(r=>r.id===other).visibility,'metadata-only');
   assert.equal(rows.find(r=>r.id===other).archived,true);
 });
+test('desktop evidence includes displayed final replies and skips moderated, replaced and unknown-phase output',t=>{
+  const root=desktop(t),db=new DatabaseSync(path.join(root,'thread_history_1.sqlite'));
+  const add=db.prepare('INSERT INTO thread_items VALUES(?,?,?,?,?,?,?)');
+  const replies=[
+    {phase:null,text:'Legacy visible reply'},
+    {phase:'final_answer',moderation:{moderated:false,display:{mode:'show'}},text:'Current visible reply'},
+    {phase:'final_answer',moderation:{moderated:true,display:{mode:'show'}},text:'DO_NOT_EXPORT_MODERATED'},
+    {phase:'final_answer',moderation:{moderated:false,display:{mode:'replace',replacement:'Notice'}},text:'DO_NOT_EXPORT_REPLACED'},
+    {moderation:{moderated:false,display:{mode:'block'}},text:'DO_NOT_EXPORT_BLOCKED'},
+    {phase:'final_answer',moderation:{moderated:false,display:{mode:'future-mode'}},text:'DO_NOT_EXPORT_UNKNOWN_DISPLAY'},
+    {phase:'future-phase',text:'DO_NOT_EXPORT_UNKNOWN_PHASE'},
+  ];
+  replies.forEach((data,i)=>add.run(other,'turn-example','reply-'+i,i,time+i,JSON.stringify({type:'agentMessage',...data}),'agentMessage'));
+  db.close();
+  const row=scanDesktop(root).find(r=>r.id===other);
+  assert.deepEqual(row.evidence.map(e=>[e.itemId,e.text]),[['reply-0','Legacy visible reply'],['reply-1','Current visible reply']]);
+  assert.equal(row.summary,'助手：Current visible reply');
+  assert.equal(row.lastMessageAt,new Date(time+1).toISOString());
+});
+
 function stage(rx,machine,rows){
   const entries=rows.map(r=>[r.id,contextDigest(r)]);
   return rx.plan(machine,{entries});
@@ -136,4 +156,12 @@ test('credential handoffs in plain language do not enter private context excerpt
 test('line wrapping cannot conceal a token handoff from the export filter',async()=>{
   const {excerpt}=await import('./context-format.mjs');
   assert.equal(excerpt('token\nfor pairing\nis example-test-code',700),'');
+});
+
+test('desktop-created test chats require explicit selection and internal subagents remain excluded',t=>{
+  const root=desktop(t),db=new DatabaseSync(path.join(root,'state_5.sqlite'));
+  db.prepare("UPDATE threads SET thread_source='agent_created_thread' WHERE id IN (?,?)").run(other,helper);
+  db.close();
+  assert.deepEqual(scanDesktop(root).map(r=>r.id),[first]);
+  assert.deepEqual(scanDesktop(root,[other,helper]).map(r=>r.id),[first,other]);
 });

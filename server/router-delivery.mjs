@@ -9,7 +9,7 @@ function finish(store,turn,state,reply,assessment=[]){
   store.transact(()=>{
     if(!['working','synthesizing'].includes(store.work.order(turn.id)?.state))return;
     const notify=store.work.evidence(turn.id).some(s=>s.notify||['failed','interrupted'].includes(s.state));
-    store.message('delivery-'+turn.id,'assistant',reply,turn.id,notify);
+    store.reply('delivery-'+turn.id,turn.id,reply,notify);
     store.db.prepare('UPDATE work_orders SET assessment=?,decision=NULL WHERE id=?').run(JSON.stringify(assessment),turn.id);
     store.work.setState(turn.id,state);
   });
