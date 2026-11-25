@@ -12,6 +12,10 @@ import {PersonalStore} from './personal-store.mjs';
 import {groupBoard} from './board-groups.mjs';
 import {findSharedWork} from './personal-opportunities.mjs';
 import {Flows} from './personal-flows.mjs';
+import {ProactiveCandidates} from './proactive-candidates.mjs';
+import {WakeRules} from './wake-rules.mjs';
+import {WorkWake} from './work-wake.mjs';
+import {cardChoice} from './proactive-chat.mjs';
 import {selectPlanner} from './personal-model.mjs';
 import {home,call} from './control.mjs';
 
@@ -20,6 +24,10 @@ const terminal=new Set(['succeeded','failed','interrupted','cancelled']);
 const noChanges=/只读|只解释|只回答|只告诉|仅解释|先别做|不要(?:执行|修改|写入|改动|派单|运行|操作)|无需(?:操作|修改)|do not (?:edit|change|write|run|dispatch)|read[ -]only|explain only/i;
 const explicitWrite=/生成|写入|创建|修改|改动|实现|制作|保存文件|写.{0,4}文件|make|creat|edit|writ|save|implement/i;
 const clean=(s,n)=>typeof s==='string'?s.trim().slice(0,n):'';
+function needsStandingRule(text){
+  return /每次|每当|每个?工作日|每天|每周|whenever|every (?:time|weekday|day|week)/iu.test(text)&&
+    /提醒我|通知我|告诉我|向我汇报|派.{0,25}(?:复核|查证)|(?:notify|remind|alert) me/iu.test(text);
+}
 const specific=(rows,id)=>rows.find(row=>row.id===id);
 const optional=async(fn,fallback)=>{try{return await fn();}catch{return fallback;}};
 function compact(row){return {machine:row.machine,target:row.target??null,id:row.id,title:clean(row.title,140),summary:clean(row.summary,720),cwd:clean(row.cwd,230),updatedAt:row.updatedAt,status:row.status,visibility:row.visibility,source:row.source,evidence:(row.evidence||[]).slice(-3).map(e=>({role:e.role,text:clean(e.text,460),at:e.at,turnId:e.turnId,itemId:e.itemId}))};}
@@ -33,9 +41,52 @@ function assert(ok,msg){if(!ok)throw Error(msg);}
 export class PersonalAgent{
   constructor({store,planner,contexts,broker=call}){
     this.store=store;this.flows=new Flows(store);this.planner=planner;this.contexts=contexts;this.broker=broker;
+    this.candidates=new ProactiveCandidates(store);this.rules=new WakeRules(store);this.workWake=new WorkWake(store);
+    this.observedRows=[];this.rowsAvailable=false;
     this.processing=false;this.checking=false;this.lastObservation=0;
   }
   async contextRows(query,limit=20){return await this.contexts.readContexts(home,{query,limit});}
+  proactiveCards(ids){return [...this.candidates.cards(ids),...this.rules.cards(ids)];}
+  history(input){
+    const result=this.store.history(input),messages=new Map(result.messages.map(m=>[m.id,m]));
+    for(const card of this.proactiveCards([...messages.keys()])){
+      const row=messages.get(card.messageId);
+      if(row)(row.proactive??=[]).push(card);
+    }
+    for(const row of result.messages)if(row.work)Object.assign(row.work,this.workWake.card(row.work.id));
+    return result;
+  }
+  async receive(input){
+    const inspect=typeof input.text==='string'&&/^(?:星舵操作|可以|同意|好|批准|立项|把这件事|开始这件工作|忽略|再查|再核对|暂停|恢复|取消|停止)/.test(input.text.trim());
+    const cards=inspect?this.proactiveCards():[];
+    const recent=this.store.db.prepare('SELECT id FROM messages ORDER BY seq DESC LIMIT 1').get();
+    const choice=typeof input.text==='string'?cardChoice(input.text,cards,recent?.id):null;
+    if(choice){
+      const cursor=choice.decision==='resume'?await optional(()=>this.broker('/wakeEvents',{after:null}),null):null;
+      return this.store.receive({...input,context:null,workId:null},null,turn=>{
+        try{
+          if(choice.error)throw Error(choice.error);
+          const card=cards.find(c=>c.id===choice.id);
+          if(!card)throw Error('未找到这张卡，请查看最新消息。');
+          if(input.context&&(!card.workId||!this.store.continuity.participants(card.workId).some(p=>p.machine===input.context.machine&&p.id===input.context.id)))
+            throw Error('请在该事项的卡片上确认。');
+          if(card.kind==='candidate')return this.candidates.decide(turn,choice);
+          const updated=this.rules.decide(turn,{...choice,cursor:cursor?.cursor});
+          this.store.finish(turn,'规则已'+({pause:'暂停',resume:'恢复',cancel:'取消'}[choice.decision]||'更新')+'。');
+          return {id:turn.id,...(updated?.workId?{workId:updated.workId}:{})};
+        }catch(e){this.store.finish(turn,e.message);return {id:turn.id};}
+      });
+    }
+    if(this.planner?.offline)throw Error('聊天模型尚未启用。请在服务器配置模型并重启助手。');
+    const row=input.context?await this.exactSession(input.context):null;
+    if(input.context&&!row)throw Error('当前索引里找不到所选会话');
+    const bindingOnly=input.workId&&row&&/^(?:(?:关联|绑定|加入|连接)(?:到)?(?:这项|本项|当前)工作(?:[，, ]*(?:仅|只)?接收(?:更新|摘要))?|(?:link|join) (?:this|the) work(?: item)?(?: to receive updates)?)[。.!！]?$/iu.test(input.text.trim());
+    if(bindingOnly)return this.store.receive(input,row,turn=>{
+      this.store.finish(turn,'已关联这段桌面会话。工作更新会送到原窗口，等你说“继续”再执行。');
+      return {id:turn.id,workId:this.store.continuity.workForTurn(turn.id)};
+    });
+    return this.store.receive(input,row);
+  }
   async exactSession({machine,id}){
     if(typeof machine!=='string'||typeof id!=='string')return null;
     if(this.contexts.readSession)return this.contexts.readSession(home,machine,id);
@@ -96,7 +147,8 @@ export class PersonalAgent{
       preferences=this.store.preferences();
       commitments=this.store.openItems().concat(this.flows.listReviews());
     }
-    return {project,work,activeWork,attachedSession:source?{...source,found:!!attached}:null,now:new Date().toISOString(),timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,currentUser:turn.text,
+    const wakeCursor=(await optional(()=>this.broker('/wakeEvents',{after:null}),null))?.cursor??null;
+    return {project,work,activeWork,wakeCursor,attachedSession:source?{...source,found:!!attached}:null,now:new Date().toISOString(),timeZone:Intl.DateTimeFormat().resolvedOptions().timeZone,currentUser:turn.text,
       preferences:preferences.slice(0,120),commitments:commitments.slice(0,100),
       history:this.store.previous(turn.seq,turn.id),sessions,coverage,workers:catalog,
       lastMentioned:participants??this.store.lastLinks(),tasks:this.store.visibleTasks(queue).filter(t=>!inScope||inScope.has(t.id)).slice(0,22)};
@@ -115,6 +167,7 @@ export class PersonalAgent{
     // A scoped amendment owns only its routing effects. Ignore the planner's
     // incidental reminder bookkeeping without touching independent personal items.
     const proposedActions=edits.length?plan.actions.filter(a=>!['close','review'].includes(a?.type)):plan.actions;
+    if(proposedActions.some(a=>a?.type==='wake_rule'))assert(proposedActions.every(a=>a?.type==='wake_rule'),'请将常驻委托与立即执行的分工分别交代');
     assert(edits.length<=1&&(!edits.length||proposedActions.every(a=>['revise','consult','dispatch'].includes(a?.type))),'一次变更需要明确一项工作及其新分工');
     const revision=edits.length?checkedRevision(edits[0],snap.activeWork||[]):null;
     const scoped=revision||proposedActions.filter(a=>['dispatch','consult','handoff'].includes(a?.type)).length>1;
@@ -122,6 +175,7 @@ export class PersonalAgent{
       assert(a&&typeof a==='object'&&typeof a.evidence==='string'&&a.evidence.trim().length>=2&&turn.text.includes(a.evidence),'操作缺少来自你本条消息的依据');
       const text=clean(a.text,1500);
       switch(a.type){
+        case 'wake_rule':actions.push(this.rules.check(a,turn,snap));break;
         case 'revise':actions.push(revision);break;
         case 'device_alias':{
           const alias=clean(a.alias,80),device=workers.find(w=>w.deviceId===a.deviceId);
@@ -200,13 +254,15 @@ export class PersonalAgent{
       }
     }
     const used=snap.preferences.filter(p=>(plan.usedPreferences||[]).includes(p.id)||plan.reply.includes(p.text)).map(({key,scope})=>({key,scope}));
-    return {reply:clean(plan.reply,14000),actions,criteria,used,refs:refs.map(r=>({machine:r.machine,id:r.id}))};
+    return {reply:clean(plan.reply,14000),actions:this.rules.uniqueGrants(actions),criteria,used,refs:refs.map(r=>({machine:r.machine,id:r.id}))};
   }
   async apply(turn,plan){
     const results=[];
     const work=this.store.work;
     const revision=plan.actions.find(a=>a.type==='revise');
-    const parent=revision?.id||turn.id;
+    const linked=this.store.continuity.workForTurn(turn.id);
+    const existing=linked&&work.order(linked);
+    const parent=revision?.id||(['working','synthesizing'].includes(existing?.state)?linked:turn.id);
     const delegated=plan.actions.some(a=>['consult','dispatch','handoff'].includes(a.type));
     if(delegated && plan.actions.some(a=>(['consult','dispatch'].includes(a.type)&&!a.actor)||(a.type==='handoff'&&!a.firstActor))){
       const catalog=await this.broker('/workers');
@@ -218,7 +274,8 @@ export class PersonalAgent{
     }
     if(delegated||revision)this.store.transact(()=>{
       if(revision)acceptRevision(this,turn,revision);
-      else work.create(turn,plan.criteria||[turn.text]);
+      else if(parent===turn.id)work.create(turn,plan.criteria||[turn.text]);
+      this.workWake.registerGoal(turn,parent);
       for(const [i,a] of plan.actions.entries()){
         const key=turn.id+':'+i;
         if(a.type==='handoff'){
@@ -245,7 +302,7 @@ export class PersonalAgent{
       }else if(a.type==='handoff'){
         const first=await this.broker('/submit',{target:a.from,prompt:a.first,mode:'workspace-write',exportFile:true,requestId:'personal:'+turn.id+':'+i});
         results[i]=first.id;
-        this.store.transact(()=>{work.bind(turn.id+':'+i,first);this.store.track(first.id,turn,false);this.flows.handoff(first.id,turn,a);this.store.ackEffect(turn.id,i,first.id);});
+        this.store.transact(()=>{work.bind(turn.id+':'+i,first);this.store.track(first.id,{id:parent},false);this.flows.handoff(first.id,{...turn,id:parent},a);this.store.ackEffect(turn.id,i,first.id);});
       }else if(a.type==='cancel'){
         const parent=work.order(a.id);
         if(parent){
@@ -271,6 +328,7 @@ export class PersonalAgent{
       for(const [i,a] of plan.actions.entries()){
         const id=turn.id+'-'+i;
         switch(a.type){
+          case 'wake_rule':this.rules.register(id,turn,a);receipts.push('已登记常驻委托，触发条件和执行记录见本条消息的卡片。');break;
           case 'device_alias':this.store.setDeviceAlias(a,turn.id);receipts.push('已记录设备称呼「'+a.alias+'」。');break;
           case 'remember':if(this.store.remember(turn,a))receipts.push('已记住：'+a.text);else receipts.push('这条已遗忘的偏好没有重新保存。');break;
           case 'forget':this.store.forget(turn,a.id);receipts.push('已从个人记忆移除。');break;
@@ -308,7 +366,14 @@ export class PersonalAgent{
       if(!plan){
         const snap=await this.snapshot(turn);
         let proposed=await this.planner.plan(snap);
-        const checked=proposal=>this.check(turn,requireConsult(turn,snap,proposal),snap);
+        const standing=needsStandingRule(turn.text);
+        const registrationMissing=proposal=>standing&&!proposal.actions?.some(a=>a.type==='wake_rule');
+        if(registrationMissing(proposed))
+          proposed=await this.planner.plan({...snap,routingCorrection:'请按原话登记重复或条件委托。无法验证条件时说明缺口，等待用户决定。'});
+        const checked=proposal=>{
+          assert(!registrationMissing(proposal),'尚未登记这条规则，请明确需要观察的条件与触发动作');
+          return this.check(turn,requireConsult(turn,snap,proposal),snap);
+        };
         try{
           try{plan=checked(proposed);}
           catch(error){
@@ -340,28 +405,39 @@ export class PersonalAgent{
     try{
       this.store.wake();
       this.flows.wake();
-      await this.flows.advance(this.broker);
+      await optional(()=>this.flows.advance(this.broker),null);
+      const catalog=await optional(()=>this.broker('/workers'),null);
       if(!this.planner?.offline&&!this.reviewing&&!this.processing){
         this.reviewing=true;
         this.flows.processReview(this.planner,event=>this.snapshot({text:event.text,id:event.source,seq:Number.MAX_SAFE_INTEGER})).catch(()=>{}).finally(()=>{this.reviewing=false;});
       }
       if(Date.now()-this.lastObservation>=30000){
-        const rows=await this.contextRows('',500);
-        this.store.observeSessions(rows);
-        const known=new Map(rows.map(row=>[row.machine+'|'+row.id,row]));
-        const visible=await Promise.all(this.store.continuity.participants().map(p=>known.get(p.machine+'|'+p.id)??this.exactSession(p)));
-        this.store.continuity.observeDesktop(visible.filter(row=>row&&!desktopHasBackfill(this.store,row)));
-        const stamp=Date.now();
-        const db=this.store.db;
-        db.prepare("INSERT OR IGNORE INTO settings VALUES('overlapSince',?)").run(String(stamp));
-        const since=Number(db.prepare("SELECT value FROM settings WHERE key='overlapSince'").get().value);
-        for(const item of findSharedWork(rows,{since,now:stamp}))this.store.message(item.id,'assistant',item.text);
-        this.lastObservation=stamp;
+        const rows=await optional(()=>this.contextRows('',500),null);
+        this.lastObservation=Date.now();
+        this.rowsAvailable=Array.isArray(rows);
+        if(this.rowsAvailable){
+          const known=new Map(rows.map(row=>[row.machine+'|'+row.id,row]));
+          const participants=this.store.continuity.participants();
+          const watched=this.store.watchers().map(w=>({machine:w.machine,id:w.sessionId}));
+          const selected=this.store.db.prepare('SELECT DISTINCT machine,sessionId AS id FROM turn_sources').all();
+          const permitted=new Map([...participants,...watched,...selected].map(p=>[p.machine+'|'+p.id,p]));
+          const visible=(await Promise.all(Array.from(permitted,([key,p])=>known.get(key)??optional(()=>this.exactSession(p),null)))).filter(Boolean);
+          this.observedRows=merge([...visible,...rows.map(row=>({...row,evidence:[],summary:''}))]);
+          this.store.observeSessions(visible);
+          this.store.continuity.observeDesktop(visible.filter(row=>participants.some(p=>p.machine===row.machine&&p.id===row.id)&&!desktopHasBackfill(this.store,row)));
+          const stamp=Date.now();
+          const db=this.store.db;
+          db.prepare("INSERT OR IGNORE INTO settings VALUES('overlapSince',?)").run(String(stamp));
+          const since=Number(db.prepare("SELECT value FROM settings WHERE key='overlapSince'").get().value);
+          for(const item of findSharedWork(visible,{since,now:stamp}))this.store.message(item.id,'assistant',item.text);
+        }
       }
       const waiting=this.store.waiting();
-      const workers=waiting.length?await optional(()=>this.broker('/workers'),[]):[];
+      const workers=Array.isArray(catalog)?catalog:[];
+      await this.rules.tick({rows:this.rowsAvailable?this.observedRows:undefined,workers:Array.isArray(catalog)?workers:undefined,broker:this.broker});
       for(const assignment of waiting){
-        const task=await this.broker('/get',{id:assignment.id});
+        const task=await optional(()=>this.broker('/get',{id:assignment.id}),null);
+        if(!task)continue;
         if(!this.store.work.order(assignment.turnId)){
           if(terminal.has(task.state))this.store.report(task,assignment);
           continue;
@@ -371,8 +447,10 @@ export class PersonalAgent{
           if(terminal.has(task.state))this.store.db.prepare('UPDATE assignments SET reported=1 WHERE id=?').run(task.id);
         });
       }
+      if(this.rowsAvailable&&Array.isArray(catalog))await this.candidates.tick({rows:this.observedRows,workers,broker:this.broker});
       for(const watch of this.store.watchers()){
-        const rows=await this.contextRows(watch.sessionId,4);
+        const rows=await optional(()=>this.contextRows(watch.sessionId,4),null);
+        if(!rows)continue;
         this.store.updateWatch(watch,rows.find(s=>s.machine===watch.machine&&s.id===watch.sessionId));
       }
     }finally{this.checking=false;}
@@ -394,13 +472,7 @@ async function start(){
       const input=JSON.parse(Buffer.concat(parts).toString()||'{}');
       let value;
       switch(req.url){
-        case '/chat':
-          if(planner.offline)throw Error('聊天模型尚未启用。请在服务器配置模型并重启助手。');
-          {
-            const row=input.context ? await agent.exactSession(input.context) : null;
-            if(input.context&&!row)throw Error('当前索引里找不到所选会话');
-            value=store.receive(input,row);break;
-          }
+        case '/chat':value=await agent.receive(input);break;
         case '/contexts/desktopCursors':
         case '/contexts/desktopPage':value=desktopBackfill(store,req.url,input);break;
         case '/contexts/redeem':
@@ -416,7 +488,7 @@ async function start(){
         case '/contexts/updates':value=store.continuity.pending(input.machine,input.target);break;
         case '/contexts/ack':value={acknowledged:store.continuity.ack(input.machine,input,input.target)};break;
         case '/board':value=await agent.board(input);break;
-        case '/history':value=store.history(input);break;
+        case '/history':value=agent.history(input);break;
         case '/notifications':value=store.notifications(input);break;
         default:throw Error('Unknown operation');
       }
@@ -428,5 +500,6 @@ async function start(){
   if(!planner.offline)setInterval(()=>pass(()=>agent.step()),700);
   setInterval(()=>pass(()=>agent.tick()),2500);
   if(!planner.offline)setInterval(()=>pass(()=>agent.deliver()),1100);
+  if(!planner.offline)setInterval(()=>pass(()=>agent.workWake.advance({planner,broker:agent.broker})),5000);
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)await start();

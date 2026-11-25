@@ -84,12 +84,20 @@ input { width: 100%; margin-top: 4px; border: 1px solid var(--line); border-radi
 .reply-row,.work-heading { display: flex; align-items: flex-start; min-width: 0; gap: var(--gutter); }
 .assistant-avatar { width: var(--avatar); height: var(--avatar); flex: none; border: 1px solid #ffffffa6; border-radius: 11px; background: #f8f8ffbd url('/assistant-mark.webp') center/82% auto no-repeat; box-shadow: var(--shadow); }
 .reply-bubble,.work-overview { max-width: min(calc(100% - var(--avatar) - var(--gutter)),42rem); padding: 10px 15px; border: 1px solid #ffffffae; background: #fbfbffcF; border-radius: 17px; box-shadow: var(--shadow); }
-.message.highlight .user-bubble,.message.highlight .reply-bubble { outline: 2px solid #697bf2; outline-offset: 2px; }
+.discovery-avatar { float: left; margin-top: 8px; }
+.message.highlight .user-bubble,.message.highlight .reply-bubble,.message.highlight .proactive-card { outline: 2px solid #697bf2; outline-offset: 2px; }
 .work-panel { margin-top: 18px; }
 .message:not(.user) .work-panel { margin-top: 8px; }
 .message:not(.user) .work-heading .assistant-avatar { visibility: hidden; }
 .work-overview strong { display: block; white-space: pre-wrap; font-weight: 500; }
 .work-revision,.work-state { color: var(--muted); font-size: .77rem; }
+.work-next { margin-top: 4px; color: var(--muted); font-size: .8rem; }
+.proactive-card { margin: 8px 0 0 calc(var(--avatar) + var(--gutter)); max-width: 42rem; padding: 12px 14px; border: 1px solid #ffffffb8; border-radius: 17px; background: #fbfbffd9; box-shadow: var(--shadow); overflow-wrap: anywhere; }
+.proactive-card .work-identity { margin-bottom: 4px; color: var(--muted); font-size: .8rem; }
+.proactive-card strong { font-size: 1rem; }
+.proactive-detail { white-space: pre-wrap; line-height: 1.5; font-size: .9rem; margin: 5px 0; }
+.proactive-actions { display: flex; flex-wrap: wrap; gap: 5px 8px; margin-top: 7px; }
+.proactive-actions button { font-size: .86rem; }
 .work-list { list-style: none; margin: 10px 0 0 calc(var(--avatar) + var(--gutter)); padding: 0; border-radius: 18px; background: #fbfbffd9; border: 1px solid #ffffffb8; box-shadow: var(--shadow); }
 .work-list:empty { display: none; }
 .work-card { padding: 0 12px; min-width: 0; overflow-wrap: anywhere; }

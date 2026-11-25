@@ -53,6 +53,10 @@ async function call(op, body = {}, title = '') {
 
 export default {
   call, state: () => call('state'), reminders: () => call('reminders'), settings: () => call('settings'),
+  chat(request, title, fromCard = false) {
+    if (fromCard) return call('chat', { text: request.text, requestId: request.requestId, cardAction: true });
+    return call('chat', request, request.context ? title : '');
+  },
   acknowledge: requestId => call('acknowledge', { requestId }),
   draft(text, context) {
     ready.then(port => port.postMessage(JSON.stringify({ event: 'draft', text, context }))).catch(() => {});

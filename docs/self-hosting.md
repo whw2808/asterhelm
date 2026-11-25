@@ -218,3 +218,11 @@ Before each new batch the connector queries the effective hook definitions for t
 A strictly passive note uses a separate client capability. In the tested stock Codex build, injecting items supplied model context without producing a visible transcript entry. Resuming an idle thread did not display a hook message before the next prompt. [Codex App Server](https://learn.chatgpt.com/docs/app-server)
 
 Clients that implement passive notes can configure `codexContinuity.socketPath` and `codexContinuity.noteWriter` in the worker's private configuration. The socket must be the public App Server Unix endpoint serving that native client. The local executable receives one JSON object on stdin with `operation: "putIfIdle"`, `socketPath`, `threadId`, `deliveryId` and `text`. It must atomically append one idempotent, model-visible and user-visible note to that idle original thread and return `{turnId,itemId}`. Asterhelm independently reads the matching visible thread item before acknowledging delivery. This release includes the verifier and connector contract. A compatible native note writer for stock Codex Desktop is not included.
+
+### 主聊天的主动跟进
+
+可以对星舵说“每次目录校对任务失败都提醒我”，也可以明确指定由哪个设备的 Agent 做只读复核。规则登记后，原消息带有条件、最近一次结果和控制按钮。日历规则使用登记时的时区。主机在线时手机可以离线；主机重启后会补读任务回执。会话活动和设备在线状态只能从已观测到的快照判断。
+
+自己发现的事项使用单独的候选卡。星舵可以派一次只读查证。只有用户在主聊天中明确批准，才会建立或关联一件工作。有多个候选时，用对应卡片的“同意立项”。在卡片里也可以忽略或额外委托一次只读复查。
+
+升级已有部署时先备份个人服务与队列的 SQLite 数据库，并更新总控和 Worker。隔离只读能力由新版 Worker 在心跳中声明；执行端缺少该能力时，任务卡会说明原因。自行配置的命令执行器只承接其既有任务。旧版一次性提醒与监视保留原有触发次数。

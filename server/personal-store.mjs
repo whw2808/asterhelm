@@ -36,7 +36,7 @@ export class PersonalStore {
     try {const value=fn();this.db.exec('COMMIT');return value;}
     catch(e){this.db.exec('ROLLBACK');throw e;}
   }
-  receive({requestId,text,context,workId},selectedRow=null) {
+  receive({requestId,text,context,workId},selectedRow=null,onNew=null) {
     if(typeof requestId!=='string'||!requestId.trim()||requestId.length>150)throw Error('缺少有效消息编号');
     if(typeof text!=='string'||!text.trim()||text.length>16000)throw Error('请输入 1–16000 字的消息');
     text=text.trim();
@@ -57,6 +57,7 @@ export class PersonalStore {
       this.db.prepare("INSERT INTO turns(id,requestId,signature,state) VALUES(?,?,?,'new')").run(id,requestId,signature);
       if(context)this.db.prepare('INSERT INTO turn_sources VALUES(?,?,?)').run(id,context.machine,context.id);
       const linked=this.continuity.receive(id,text,context,selectedRow,workId);
+      if(onNew)return onNew({id,text})??{id};
       return linked?{id,workId:linked}:{id};
     });
   }

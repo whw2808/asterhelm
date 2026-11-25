@@ -70,7 +70,7 @@ function handle(remote) {
           case '/worker/inventory': value=queue.registry.recordHardware(principal,target,body.observation);break;
           case '/worker/claim': value=queue.claim(target);break;
           case '/worker/input': value=queue.input(target,body.id);break;
-          case '/worker/heartbeat': value=queue.beat(target,body.id,body.status,body.progress);break;
+          case '/worker/heartbeat': value=queue.beat(target,body.id,body.status,body.progress,body.isolatedRead);break;
           case '/worker/finish': value=queue.finish(target,body);break;
           default: throw Error('Unknown worker operation');
         }
@@ -82,6 +82,7 @@ function handle(remote) {
           case '/cancelByRequestId': value=queue.cancelByRequestId(body.requestId);break;
           case '/cancel': value=queue.cancel(body.id);break;
           case '/list': value=queue.list();break;
+          case '/wakeEvents': value=queue.wakeEvents(body);break;
           case '/workers': value=queue.workers();break;
           default: throw Error('Unknown operation');
         }

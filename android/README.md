@@ -29,6 +29,8 @@ Install the debug APK on your Android device. If you use Android SDK Platform-To
 
 On the board, open a desktop session and choose **接着聊**. Messages keep using this session across app restarts. After the first message is accepted, choose **加入当前工作** on a different session to include it in that work when you send your next message. Choosing **接着聊** on the other session opens its own work. **退出接续** returns the composer to general chat. The delivery label below a message shows whether its update has reached the desktop.
 
+Discovery and standing-rule cards update on the original chat message. A discovery shows its evidence and any read-only check. Tap **同意立项** to start the proposed work, or use the card to ignore it or request another check. A rule shows its next check or awaited event, recent activity and available controls. Card actions retain their request identity across retries and leave the composer draft and selected desktop session in place.
+
 Install the updated APK over the previous version with the same signing identity and server origin to keep the existing pairing. If a message was pending in the previous version, selecting its original session restores the text for retry.
 
 The interface loads from assets bundled in the APK. Only native HTTPS requests contact the configured Asterhelm server. When enabled, reminders use a foreground service with a visible notification and a periodic catch-up job.
