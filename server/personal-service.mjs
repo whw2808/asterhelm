@@ -117,6 +117,7 @@ export class PersonalAgent{
     const proposedActions=edits.length?plan.actions.filter(a=>!['close','review'].includes(a?.type)):plan.actions;
     assert(edits.length<=1&&(!edits.length||proposedActions.every(a=>['revise','consult','dispatch'].includes(a?.type))),'一次变更需要明确一项工作及其新分工');
     const revision=edits.length?checkedRevision(edits[0],snap.activeWork||[]):null;
+    const scoped=revision||proposedActions.filter(a=>['dispatch','consult','handoff'].includes(a?.type)).length>1;
     for(const a of proposedActions){
       assert(a&&typeof a==='object'&&typeof a.evidence==='string'&&a.evidence.trim().length>=2&&turn.text.includes(a.evidence),'操作缺少来自你本条消息的依据');
       const text=clean(a.text,1500);
@@ -166,7 +167,8 @@ export class PersonalAgent{
           }
           if(attached&&attached.machine===worker.deviceId&&sourceId)assert(attached.id===sourceId,'指定会话与所选会话不一致');
           const context=row?'\n来源会话，只读资料：'+JSON.stringify(compact(row)):'';
-          const objective='\n本次要求：'+(revision?.goal||turn.text)+'\n整项交付要求：'+JSON.stringify(revision?.criteria||criteria)+'\n请完成本次分工，结论区分已查实与推断，标注关键依据；允许材料不足，说明具体缺口。';
+          const objective=scoped?'\n只执行上方委派给你的分工，直接交回这一份产出与依据。其他执行端由总控协调。':
+            '\n本次要求：'+turn.text+'\n整项交付要求：'+JSON.stringify(criteria)+'\n请完成本次分工，结论区分已查实与推断，标注关键依据；允许材料不足，说明具体缺口。';
           actions.push({type:a.type,target:worker.target,actor:actor(worker),title:clean(a.title||prompt.split('\n')[0],90),
             prompt:prompt+objective+context,mode,notify:a.notify===true});break;
         }

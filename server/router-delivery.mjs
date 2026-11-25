@@ -26,14 +26,16 @@ function finish(store,turn,state,reply,assessment=[]){
     store.work.setState(turn.id,state);
   });
 }
-function reviewCoverage(criteria,coverage,results){
+function reviewCoverage(criteria,coverage,results,scopeReceipts){
   if(!Array.isArray(coverage)||coverage.length!==criteria.length)throw Error('Incomplete delivery checklist');
   return criteria.map((item,index)=>{
     const row=coverage.find(r=>r.index===index);
     if(!row||!['answered','missing'].includes(row.status)||!row.finding?.trim())throw Error('Invalid coverage row');
     const sources=Array.isArray(row.sources)?row.sources:[];
-    const supported=sources.length>0&&sources.every(id=>results.some(r=>r.id===id&&r.state==='succeeded'&&r.result));
-    return {item,finding:row.finding.trim(),sources:sources.filter(id=>results.some(r=>r.id===id)),answered:row.status==='answered'&&supported};
+    const receipts=row.kind==='status'?scopeReceipts:[];
+    const verified=id=>results.some(r=>r.id===id&&r.state==='succeeded'&&r.result)||receipts.some(r=>r.id===id&&r.finishedAt);
+    const supported=sources.length>0&&sources.every(verified);
+    return {item,finding:row.finding.trim(),sources:sources.filter(id=>results.some(r=>r.id===id)||receipts.some(r=>r.id===id)),answered:row.status==='answered'&&supported};
   });
 }
 function eligibleWorkers(workers,steps,revision){
@@ -92,7 +94,12 @@ export async function deliverWork(agent){
   const criteria=JSON.parse(turn.criteria);
   try{
     if(turn.decision){await submitFollowUp(agent,turn,JSON.parse(turn.decision));return;}
-    const steps=work.evidence(turn.id).filter(s=>s.scope==='active');
+    const assignments=work.evidence(turn.id);
+    const steps=assignments.filter(s=>s.scope==='active');
+    const scopeReceipts=assignments.filter(s=>s.scope==='paused').map(s=>({
+      id:'receipt:'+s.id,title:s.title,device:s.deviceName,agent:s.agentName,progress:s.progress,finishedAt:s.finishedAt,
+      workerConfirmedStop:s.workerState==='cancelled',
+    }));
     if(steps.some(s=>s.state==='cancelled')){
       finish(store,turn,'cancelled','这项工作的执行已取消。已收到的回执保留在原任务卡中。');return;
     }
@@ -105,10 +112,10 @@ export async function deliverWork(agent){
     const canConsult=turn.round<2&&eligible.length>0;
     const question=turn.goal??turn.text;
     const output=await planner.plan({phase:'delivery',originalQuestion:question,amendment:turn.amendment,revision:turn.revision,
-      criteria,results,canConsult,workers:eligible,preferences:store.preferences().map(p=>({text:p.text,scope:p.scope})),
+      criteria,results,scopeReceipts,canConsult,workers:eligible,preferences:store.preferences().map(p=>({text:p.text,scope:p.scope})),
       requestedFormat:'用用户的语言。先给结论，解释比较对象各自的具体依据和差别，只在当前证据支持的范围内作答。'});
     if(!current(store,turn))return;
-    const coverage=reviewCoverage(criteria,output.coverage,results);
+    const coverage=reviewCoverage(criteria,output.coverage,results,scopeReceipts);
     const missing=coverage.filter(r=>!r.answered);
     const follow=output.actions?.length===1?output.actions[0]:null;
     if(missing.length&&canConsult&&['consult','dispatch'].includes(follow?.type)){
@@ -116,9 +123,7 @@ export async function deliverWork(agent){
       const worker=eligible.find(w=>w.target===follow.target&&w.modes.includes(mode));
       if(worker&&(follow.write==null||typeof follow.write==='boolean')&&(follow.type==='dispatch'||mode==='read-only')&&typeof follow.prompt==='string'&&follow.prompt.trim()){
         const title=String(follow.title||'核实剩余要求').slice(0,90);
-        const prompt=['仅处理以下当前目标与未完成的要求。','当前目标：'+question,
-          turn.amendment?'用户的最新调整：'+turn.amendment:'','未完成：'+missing.map(m=>m.item).join('；'),
-          '本次分工：'+follow.prompt.slice(0,6500)].filter(Boolean).join('\n');
+        const prompt='仅处理本次分工，交回可核对的具体产出与依据。由总控核对整项工作与其他设备的回执。\n本次分工：'+follow.prompt.slice(0,6500);
         const action={target:worker.target,mode,title,prompt,notify:steps.some(s=>s.notify)};
         store.transact(()=>{
           if(!current(store,turn))return;

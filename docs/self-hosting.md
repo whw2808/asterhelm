@@ -181,7 +181,7 @@ To exercise setup and enrollment on a development machine, run `node --test scri
 
 ### Change a job from the main conversation
 
-Send the original request and any change of scope in the same phone conversation. For example, a catalog can have a print assignment and a digital assignment. Sending “Pause the digital edition and continue the print edition” updates the goal and acceptance criteria on the existing work order. Its card shows the responsible device and agent, elapsed time, and whether a withdrawal is pending, the worker confirmed a stop, or the task was withdrawn before pickup. A late digital result is excluded from the revised delivery.
+Send the original request and any change of scope in the same phone conversation. For example, a catalog can have a print assignment and a digital assignment. Sending “Pause the digital edition and continue the print edition” updates the goal and acceptance criteria on the existing work order. Its card shows the responsible device and agent, elapsed time, and whether a withdrawal is pending, the worker confirmed a stop, or the task was withdrawn before pickup. Each parallel worker receives its own assignment. The router can cite a stopped assignment’s receipt when reporting its status. A late digital result is excluded from the revised delivery.
 
 The router keeps one transcript. Its DeepSeek Harness planner runs each inference with durable session storage disabled. Each work order records its goal, revisions, assignment IDs and receipts. External agent sessions can be linked to a work order. An update delivered to a linked desktop session still asks for an acknowledgment only. The phone can continue issuing work while that session waits for its user.
 

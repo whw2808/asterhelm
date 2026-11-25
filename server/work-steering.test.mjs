@@ -44,6 +44,8 @@ test('single chat steers the existing order: a stopped branch is acknowledged an
   const a=new PersonalAgent({store,queue,broker,planner,contexts});
   const first=store.receive({requestId:'book',text:paper+'，'+digital});await a.step();
   const print=queue.claim(workers[0].target),screen=queue.claim(workers[1].target);assert.ok(print&&screen);
+  assert.doesNotMatch(print.prompt,new RegExp(digital));
+  assert.doesNotMatch(screen.prompt,new RegExp(paper));
   await a.tick();const change=store.receive({requestId:'change',text:amend});
   assert.equal(store.heldForInput(first.id),true);
   await a.step();
