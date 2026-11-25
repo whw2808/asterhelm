@@ -1,4 +1,5 @@
 import { Lexer } from './mobile-marked.mjs';
+import { ChatBinding } from './mobile-work.mjs';
 
 const native = location.origin === 'https://appassets.androidplatform.net'
   ? (await import('/android-host.js')).default : null;
@@ -29,28 +30,62 @@ function node(tag, text, className) {
   if (className) n.className = className;
   return n;
 }
-function stored(key) {
-  try { return JSON.parse(sessionStorage.getItem(key) || 'null'); } catch { return null; }
+let pairing = '';
+function stored(key, durable = false) {
+  if (!pairing) return null;
+  try { return JSON.parse((durable ? localStorage : sessionStorage).getItem(pairing + '/' + key)); } catch { return null; }
 }
-function store(key, value) {
-  try { if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, JSON.stringify(value)); } catch {}
+function store(key, value, durable = false) {
+  if (!pairing) return;
+  try {
+    const storage = durable ? localStorage : sessionStorage;
+    const slot = pairing + '/' + key;
+    if (value == null) storage.removeItem(slot); else storage.setItem(slot, JSON.stringify(value));
+  } catch {}
 }
 let view = 'loading', timer, clockTimer, refreshVersion = 0, viewVersion = 0, sending = false, pending = false;
 let historySignature = '', boardSignature = '', draft = null;
 let transcript = [], historyStart = false, loadingEarlier = false, following = true;
 let focusedId = '', needsFocus = false, authenticated = false, composing = false;
 const historyPageSize = 80;
-let selectedContext = null;
-function sameSession(a, b) { return (a?.machine || '') === (b?.machine || '') && (a?.id || '') === (b?.id || ''); }
-function attach(context) {
-  selectedContext = context;
-  if (!native) store('personal-chat-context', context);
+let binding = new ChatBinding(), changingBinding = false;
+function showBinding() {
+  const context = binding.current;
   $('attached').hidden = !context;
-  $('context-title').textContent = context ? ['接着聊', target(context.machine), context.title || context.id].join(' · ') : '';
-  $('message').placeholder = context ? '想在这个会话里继续做什么？' : '发消息…';
-  if (native && authenticated) native.draft($('message').value, selectedContext);
+  $('context-title').textContent = context ? ['接续中', context.title || context.id].join(' · ') : '';
+  $('context-title').title = context ? target(context.machine) + ' · ' + context.title : '';
+  $('message').placeholder = context ? '继续这项工作…' : '发消息…';
 }
-$('detach').onclick = () => { attach(null); $('message').focus(); };
+function persistBinding(receipt = false) {
+  if (native) return native.call('binding', { binding: binding.current, receipt });
+  if (!receipt || stored('personal-chat-context', true)?.bindingId === binding.current?.bindingId) {
+    store('personal-chat-context', binding.current, true);
+  }
+}
+async function selectSession(session, joinCurrent = false) {
+  if (changingBinding) return false;
+  const previous = binding;
+  const discard = draft && previous.matches(draft) ? draft.text : null;
+  binding = new ChatBinding(previous.current);
+  binding.select(session, joinCurrent);
+  changingBinding = true; updateSend();
+  try {
+    await persistBinding();
+    if (!authenticated) return false;
+    if ($('message').value.trim() === discard) $('message').value = '';
+    const recovered = binding.recoverLegacy(draft);
+    if (recovered && !$('message').value) { draft = recovered; $('message').value = recovered.text; }
+    boardSignature = '';
+    showBinding(); rememberInput();
+    return true;
+  } catch (error) {
+    binding = previous; fail(error);
+    return false;
+  } finally {
+    changingBinding = false; updateSend();
+  }
+}
+$('detach').onclick = async () => { if (await selectSession(null)) $('message').focus(); };
 const codeFormat = /^[A-Za-z0-9_-]{43}$/;
 function parseCode(text) {
   const raw = text.trim();
@@ -91,14 +126,22 @@ function changeView(to) {
   }
 }
 async function api(path, body = {}) {
-  if (native) return native.call(path, body, path === 'chat' ? selectedContext?.title || '' : '');
+  if (native) return native.call(path, body, path === 'chat' ? binding.current?.title || '' : '');
   let response;
   try {
+    const headers = { 'Content-Type': 'application/json' };
+    if (pairing && path !== 'pair') headers['X-Asterhelm-Pairing'] = pairing;
     response = await fetch('/api/' + path, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers,
       credentials: 'same-origin', body: JSON.stringify(body),
     });
   } catch { throw Error('暂时连不上服务器，请检查网络后重试。'); }
+  const scope = response.headers.get('X-Asterhelm-Pairing');
+  if (scope && pairing && scope !== pairing) {
+    location.reload();
+    throw Error('配对已切换，正在重新打开对话。');
+  }
+  if (scope) pairing = scope;
   let data;
   try { data = await response.json(); } catch { throw Error('连接中断，请稍后重试。'); }
   if (!response.ok) throw Object.assign(Error(data.error || '请求未完成，请重试。'), { status: response.status });
@@ -120,7 +163,9 @@ function showPair() {
   changeView(native ? 'loading' : 'pair');
   if ($('source-dialog').open) $('source-dialog').close();
   $('source-path').value = ''; $('record-list').replaceChildren();
-  attach(null); draft = null; store('personal-chat-pending', null); store('personal-chat-input', null);
+  binding = new ChatBinding(); showBinding(); draft = null;
+  store('personal-chat-context', null, true); store('personal-chat-pending', null); store('personal-chat-input', null);
+  pairing = '';
   $('message').value = ''; updateSend(); resetHistory();
   boardSignature = '';
   detailsOpen.clear(); targetNames.clear(); latestBoard = null; selectedAgent = null; boardScroll = 0;
@@ -154,7 +199,7 @@ $('pair-form').onsubmit = async event => {
   }
 };
 function updateSend() {
-  $('send').disabled = !authenticated || sending || !$('message').value.trim();
+  $('send').disabled = !authenticated || sending || changingBinding || !$('message').value.trim();
   const field = $('message');
   field.style.height = 'auto';
   field.style.height = field.scrollHeight + 'px';
@@ -451,9 +496,14 @@ function historyMessage(item) {
   const isUser = item.role === 'user';
   const message = node('article', undefined, 'message' + (isUser ? ' user' : ''));
   message.dataset.id = item.id;
-  message.setAttribute('aria-label', [isUser ? '你' : '个人助手', stamp(item.createdAt)].filter(Boolean).join(' · '));
-  if (isUser) message.append(node('p', item.text, 'user-bubble'));
-  else {
+  const speaker = isUser ? '你' : item.provenance ? '桌面 · ' + target(item.provenance.machine) : '个人助手';
+  message.setAttribute('aria-label', [speaker, stamp(item.createdAt)].filter(Boolean).join(' · '));
+  if (isUser) {
+    message.append(node('p', item.text, 'user-bubble'));
+    if (item.continuity?.delivery === 'pending' || item.continuity?.delivery === 'delivered') {
+      message.append(node('p', item.continuity.delivery === 'pending' ? '桌面待送达' : '已送达桌面', 'work-receipt'));
+    }
+  } else {
     const row = node('div', undefined, 'reply-row');
     const bubble = markdown(item.text);
     bubble.classList.add('reply-bubble');
@@ -506,7 +556,7 @@ function renderHistory(value, prepend = false) {
       let message = existing.get(String(item.id));
       const old = previous.get(item.id);
       if (!message || JSON.stringify(old) !== JSON.stringify(item)) {
-        if (message && old?.work && item.work && item.role === 'user' && old.text === item.text && old.createdAt === item.createdAt) {
+        if (message && old?.work && item.work && item.role === 'user' && old.text === item.text && old.createdAt === item.createdAt && old.continuity?.delivery === item.continuity?.delivery) {
           workPanel(item.work, message.querySelector('.work-panel'));
         } else {
           const next = historyMessage(item);
@@ -519,12 +569,10 @@ function renderHistory(value, prepend = false) {
       updateDate(message, item, list[index - 1]);
     });
     historySignature = signature;
-    if (draft && list.some(item => item.requestId === draft.requestId)) {
-      if ($('message').value.trim() === draft.text) $('message').value = '';
-      if (sameSession(selectedContext, draft.context)) attach(null);
-      if (native) native.acknowledge(draft.requestId).catch(() => {});
-      store('personal-chat-pending', null); draft = null; rememberInput(); updateSend();
-    }
+  }
+  const accepted = draft && list.find(item => item.requestId === draft.requestId);
+  if (accepted) {
+    acceptDraft(draft, accepted.continuity?.workId);
   }
   $('welcome').hidden = list.length > 0 || pending;
   $('thinking').hidden = Number(value.pending || 0) <= list.filter(item => liveWork(item.work)).length;
@@ -604,14 +652,21 @@ function sessionLine(session) {
   detail.append(node('summary', session.title || '未命名会话'));
   detail.append(node('span', [target(session.machine), session.source, stamp(session.updatedAt), session.visibility === 'metadata-only' ? '仅会话信息' : ''].filter(Boolean).join(' · '), 'row-meta'));
   if (session.summary) detail.append(node('p', session.summary, 'row-text'));
-  const resume = node('button', '接着聊');
-  resume.type = 'button'; resume.className = 'resume-session';
-  resume.onclick = () => {
-    attach({ machine: session.machine, id: session.id, title: session.title || '未命名会话' });
-    openLatest();
-    $('message').focus({ preventScroll: true });
-  };
-  detail.append(resume); li.append(detail);
+  function action(label, joinCurrent) {
+    const button = node('button', label, 'resume-session');
+    button.type = 'button';
+    button.onclick = async () => {
+      if (!await selectSession(session, joinCurrent)) return;
+      openLatest();
+      $('message').focus({ preventScroll: true });
+    };
+    detail.append(button);
+  }
+  action('接着聊', false);
+  if (binding.current?.workId && (binding.current.machine !== session.machine || binding.current.id !== session.id)) {
+    action('加入当前工作', true);
+  }
+  li.append(detail);
   return li;
 }
 const logoPaths = { codex: '/agent-codex.png', deepseek: '/agent-deepseek.png' };
@@ -784,8 +839,8 @@ function resetHistory() {
 }
 function rememberInput() {
   if (!authenticated) return;
-  if (native) native.draft($('message').value, selectedContext);
-  else store('personal-chat-input', $('message').value || null);
+  if (native) native.draft($('message').value, binding.current);
+  else store('personal-chat-input', { text: $('message').value, bindingId: binding.current?.bindingId });
 }
 async function restoreInput() {
   if (authenticated) return;
@@ -793,11 +848,13 @@ async function restoreInput() {
   if (authenticated || !['chat','board'].includes(view)) return;
   if (native && !snapshot?.paired) throw Object.assign(Error('请重新连接设备。'), { status: 401 });
   draft = native ? snapshot.pending : stored('personal-chat-pending');
-  const context = draft?.context;
-  const attachment = context ? { ...context, title: (native ? snapshot.pendingTitle : stored('personal-chat-context')?.title) || context.id } : null;
-  const hasTyped = native && snapshot.typedDraft != null;
-  attach((hasTyped ? snapshot.typedContext : attachment || (!native && stored('personal-chat-context'))) || null);
-  $('message').value = (native ? snapshot.typedDraft : stored('personal-chat-input')) ?? draft?.text ?? '';
+  binding = new ChatBinding(native ? snapshot.binding : stored('personal-chat-context', true));
+  const typed = native
+    ? { text: snapshot.typedDraft, bindingId: snapshot.typedContext?.bindingId, context: snapshot.typedContext }
+    : stored('personal-chat-input');
+  draft = binding.recoverLegacy(draft) || draft;
+  $('message').value = binding.restoreText(typed, draft);
+  showBinding();
   authenticated = true;
   rememberInput();
   updateSend();
@@ -956,21 +1013,30 @@ $('suggestions').onclick = event => {
   if (event.target.tagName !== 'BUTTON' || !authenticated) return;
   $('message').value = event.target.textContent; updateSend(); $('composer').requestSubmit();
 };
+function acceptDraft(request, workId) {
+  if (draft !== request) return;
+  if (binding.matches(request) && $('message').value.trim() === request.text) $('message').value = '';
+  let saved;
+  if (binding.accept(request, workId)) {
+    saved = persistBinding(true);
+    boardSignature = '';
+    if (view === 'board' && latestBoard) renderBoard(latestBoard);
+  }
+  if (native) Promise.resolve(saved).then(() => native.acknowledge(request.requestId)).catch(fail);
+  store('personal-chat-pending', null); draft = null; rememberInput(); updateSend();
+}
 $('composer').onsubmit = async event => {
   event.preventDefault();
   const text = $('message').value.trim();
-  if (!authenticated || !text || sending || composing) return;
-  const context = selectedContext ? { machine: selectedContext.machine, id: selectedContext.id } : undefined;
-  if (draft?.text !== text || !sameSession(draft?.context, context)) {
-    draft = { text, requestId: crypto.randomUUID(), ...(context ? { context } : {}) };
-  }
-  if (!native) store('personal-chat-pending', draft);
+  if (!authenticated || !text || sending || changingBinding || composing) return;
+  const request = binding.request(text, draft);
+  draft = request;
+  if (!native) store('personal-chat-pending', request);
   sending = true; updateSend(); notice('');
   try {
-    await api('chat', draft);
-    if ($('message').value.trim() === text) $('message').value = '';
-    if (sameSession(selectedContext, context)) attach(null);
-    store('personal-chat-pending', null); draft = null; rememberInput();
+    const { bindingId, ...payload } = request;
+    const result = await api('chat', native ? request : payload);
+    acceptDraft(request, result?.workId);
     if (view === 'chat' && focusedId) await openLatest();
     else {
       if (view === 'chat') { following = true; $('conversation').scrollTop = $('conversation').scrollHeight; }

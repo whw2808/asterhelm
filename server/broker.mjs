@@ -2,7 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
-import {home} from './control.mjs';
+import {home,personalCall} from './control.mjs';
 import {Queue} from './queue.mjs';
 import {ContextReceiver} from './context-receive.mjs';
 
@@ -36,10 +36,21 @@ function handle(remote) {
       if (req.url.startsWith('/contexts/')) {
         const machine=queue.registry.authorizeDevice(principal,body.deviceId??queue.registry.deviceFor(principal));
         const connectors=queue.registry.list().filter(r=>r.deviceId===machine&&r.contextSources.length);
-        const source=target?connectors.find(r=>r.target===target):connectors[0];
+        const workRoute=['/contexts/catchUp','/contexts/redeem','/contexts/desktopCursors','/contexts/desktopPage','/contexts/updates','/contexts/ack'].includes(req.url);
+        const source=target?connectors.find(r=>r.target===target):workRoute?connectors.find(r=>r.contextSources.includes('Codex Desktop')):connectors[0];
         if(!source)throw Error('No context connector registered for this identity');
         const scope={target:source.target,sources:source.contextSources};
         switch(req.url){
+          case '/contexts/desktopCursors':
+          case '/contexts/desktopPage':
+          case '/contexts/redeem':
+          case '/contexts/catchUp':
+          case '/contexts/updates':
+          case '/contexts/ack': {
+            if(!source.contextSources.includes('Codex Desktop'))throw Error('Connector does not own desktop sessions');
+            value=await personalCall(req.url,{machine,target:source.target,threadId:body.threadId,deliveryId:body.deliveryId,ticket:body.ticket,after:body.after,through:body.through,evidence:body.evidence});
+            break;
+          }
           case '/contexts/plan': value=contexts.plan(machine,body,scope);break;
           case '/contexts/put': value=contexts.put(machine,body,scope);break;
           case '/contexts/commit': value=contexts.commit(machine,body,scope);break;

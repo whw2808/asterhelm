@@ -86,3 +86,12 @@ export function readContexts(home,{query='',limit=30,project=''}={}){
   return scored.sort((a,b)=>b.score-a.score || b.row.updatedAt.localeCompare(a.row.updatedAt) ||
     a.row.id.localeCompare(b.row.id)).slice(0,Math.max(0,Math.min(500,Number(limit)||0))).map(x=>x.row);
 }
+
+// Stable lookup for an explicit user selection, independent of search ranking.
+export function readSession(home,machine,id){
+  if(!safeDeviceId(machine))return null;
+  const row=machineRows(home,machine).find(item=>item.id===id);
+  if(!row)return null;
+  const registration=readRegistry(home).find(r=>r.deviceId===machine&&r.contextSources.includes(row.source));
+  return {...row,machine,target:registration?.target??null};
+}

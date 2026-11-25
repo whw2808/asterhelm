@@ -4,8 +4,8 @@ export const terminalTasks=new Set(['succeeded','failed','cancelled','interrupte
 const stages={working:'执行中',claimed:'执行端已接单',preparing_workspace:'正在准备工作目录',running_executor:'Agent 正在执行',collecting_result:'正在收集执行结果',sending_result:'正在交回结果'};
 const activeParents="('working','synthesizing')";
 export class WorkJournal {
-  constructor(db){
-    this.db=db;
+  constructor(db,continuity){
+    this.db=db;this.continuity=continuity;
     db.exec(`CREATE TABLE IF NOT EXISTS work_orders(
       id TEXT PRIMARY KEY, criteria TEXT NOT NULL, state TEXT NOT NULL, updatedAt TEXT NOT NULL,
       round INTEGER DEFAULT 0, failures INTEGER DEFAULT 0, retryAt INTEGER DEFAULT 0, decision TEXT);
@@ -37,9 +37,12 @@ export class WorkJournal {
     this.observe(task);
   }
   stopUnsubmitted(key,state,progress){
-    const row=this.db.prepare('UPDATE work_steps SET state=?,progress=?,finishedAt=? WHERE id=? AND taskId IS NULL AND finishedAt IS NULL RETURNING parent')
+    const step=this.db.prepare('UPDATE work_steps SET state=?,progress=?,finishedAt=? WHERE id=? AND taskId IS NULL AND finishedAt IS NULL RETURNING *')
       .get(state,progress,stamp(),key);
-    if(row)this.touch(row.parent);
+    if(step){
+      this.continuity.task(step,state==='cancelled'?'已确认停止':'执行中断');
+      this.touch(step.parent);
+    }
   }
   observe(task,worker){
     const old=this.db.prepare('SELECT * FROM work_steps WHERE taskId=?').get(task.id);
@@ -53,6 +56,11 @@ export class WorkJournal {
     const heartbeat=task.lastHeartbeatAt||old.lastHeartbeatAt||null;
     const finished=terminal?(task.finishedAt||task.updated||stamp()):null;
     const result=terminal?String(task.result||'').slice(0,100000):'';
+    const phase=({succeeded:'已完成',cancelled:'已确认停止',interrupted:'执行中断',failed:'执行失败'})[state]
+      ||(task.cancelRequested?'已请求停止，等待执行端确认':null)
+      ||({offline:'设备离线，等待回执',queued:'等待执行端接单'})[state]
+      ||stages[task.progress]||'执行中';
+    this.continuity.task(old,phase,state==='succeeded'?task.result:'');
     if(state===old.state&&progress===old.progress&&started===old.startedAt&&heartbeat===old.lastHeartbeatAt&&!terminal)return true;
     this.db.prepare('UPDATE work_steps SET state=?,progress=?,startedAt=?,lastHeartbeatAt=?,finishedAt=?,result=? WHERE id=?')
       .run(state,state==='offline'?'连接中断，等待回执':progress,started,heartbeat,finished,result,old.id);

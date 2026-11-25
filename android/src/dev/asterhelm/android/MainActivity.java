@@ -247,12 +247,14 @@ public final class MainActivity extends Activity {
         if (context != null && context.optString("id").length() <= 150 && context.optString("machine").length() <= 128) {
             String title = context.optString("title");
             snapshot.put("context", Api.args("id", context.optString("id"), "machine", context.optString("machine"),
-                    "title", title.substring(0, Math.min(title.length(), 512))));
+                    "bindingId", context.optString("bindingId"), "title", title.substring(0, Math.min(title.length(), 512))));
         }
         typed = snapshot;
     }
     private JSONObject state() throws Exception {
         JSONObject result = switches();
+        String binding = Vault.read(this, "chatBinding");
+        result.put("binding", binding.isEmpty() ? JSONObject.NULL : new JSONObject(binding));
         String pending = Vault.read(this, "unsent");
         result.put("pending", pending.isEmpty() ? JSONObject.NULL : new JSONObject(pending));
         result.put("pendingTitle", Vault.read(this, "unsentContextTitle"));
@@ -279,11 +281,13 @@ public final class MainActivity extends Activity {
                 JSONObject payload = Api.args("text", text, "requestId", id);
                 JSONObject context = body.optJSONObject("context");
                 if (context != null) payload.put("context", Api.args("machine", context.getString("machine"), "id", context.getString("id")));
+                if (context != null && body.has("workId")) payload.put("workId", body.getString("workId"));
+                JSONObject pending = new JSONObject(payload.toString());
+                if (context != null && body.has("bindingId")) pending.put("bindingId", body.getString("bindingId"));
                 Vault.write(this, "unsentContextTitle", title);
-                Vault.write(this, "unsent", payload.toString());
-                JSONObject result = Api.call(this, "chat", payload);
-                acknowledge(id);
-                return result;
+                Vault.write(this, "unsent", pending.toString());
+                // Keep the idempotency key until the composer reconciles the accepted message.
+                return Api.call(this, "chat", payload);
             case "history":
                 JSONObject page = new JSONObject();
                 if (body.has("before")) page.put("before", body.getLong("before"));
@@ -300,6 +304,28 @@ public final class MainActivity extends Activity {
         if (shell != source || !alive()) return;
         int id = item.optInt("id");
         String op = item.optString("op");
+        if ("binding".equals(op)) {
+            // A slow send may still be on the network. An explicit switch/exit must survive a cold start immediately.
+            try {
+                if (!Vault.paired(this)) throw new Api.Failure(401, "请重新配对。");
+                JSONObject body = item.getJSONObject("body");
+                JSONObject binding = body.optJSONObject("binding");
+                // A receipt from an older WebView must respect a later explicit switch or exit.
+                if (body.optBoolean("receipt")) {
+                    String saved = Vault.read(this, "chatBinding");
+                    if (saved.isEmpty() || binding == null ||
+                            !new JSONObject(saved).optString("bindingId").equals(binding.optString("bindingId"))) {
+                        source.send("id", id, "value", false);
+                        return;
+                    }
+                }
+                Vault.write(this, "chatBinding", binding == null ? "" : binding.toString());
+                source.send("id", id, "value", true);
+            } catch (Exception e) {
+                source.send("id", id, "error", "无法保存当前工作", "status", e instanceof Api.Failure ? ((Api.Failure)e).status : 0);
+            }
+            return;
+        }
         if ("settings".equals(op)) {
             startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName()));
             source.send("id", id, "value", true); return;

@@ -1,9 +1,10 @@
 import http from 'node:http';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as wait } from 'node:timers/promises';
-import { home, call } from './control.mjs';
+import { home, call, personalCall } from './control.mjs';
 import { PhoneAuth } from './phone-auth.mjs';
 import { phoneOrigin } from './phone-origin.mjs';
 
@@ -16,6 +17,7 @@ const cookieOptions = '; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=';
 const assets = new Map([
   ['/', ['mobile.html', 'text/html; charset=utf-8']],
   ['/app.js', ['mobile.js', 'text/javascript; charset=utf-8']],
+  ['/mobile-work.mjs', ['mobile-work.mjs', 'text/javascript; charset=utf-8']],
   ['/mobile-marked.mjs', ['mobile-marked.mjs', 'text/javascript; charset=utf-8']],
   ['/app.css', ['mobile.css', 'text/css; charset=utf-8']],
   ['/agent-codex.png', ['agent-codex.png', 'image/png']],
@@ -26,26 +28,6 @@ const assets = new Map([
 ]);
 const controlRoutes = new Set(['/submit', '/list', '/get', '/cancel', '/workers']);
 const personalRoutes = new Set(['/chat', '/board', '/history', '/notifications']);
-
-function personalCall(route, input, signal) {
-  return new Promise((resolve, reject) => {
-    const request = http.request({
-      method: 'POST', path: route, socketPath: path.join(home, 'personal.sock'), signal, timeout: 15000,
-      headers: { 'Content-Type': 'application/json' },
-    }, async response => {
-      try {
-        const chunks = [];
-        for await (const chunk of response) chunks.push(chunk);
-        const body = JSON.parse(Buffer.concat(chunks));
-        if (body.error || response.statusCode >= 400) throw Error(body.error || '个人助手暂时无法响应。');
-        resolve(body.value);
-      } catch (error) { reject(error); }
-    });
-    request.on('timeout', () => request.destroy(Error('个人助手响应超时，请稍后重试。')));
-    request.on('error', reject);
-    request.end(JSON.stringify(input));
-  });
-}
 
 async function nextNotifications(input, session, signal) {
   const after = input.after ?? 0;
@@ -108,6 +90,12 @@ const server = http.createServer({ headersTimeout: 8000, requestTimeout: 12000 }
     const session = (req.headers.cookie || '').split(';').map(part => part.trim())
       .find(part => part.startsWith(cookieName + '='))?.slice(cookieName.length + 1);
     if (route !== '/pair' && !auth.valid(session)) return json(401, { error: '请使用 服务器生成的配对链接连接手机。' });
+    if (route !== '/pair') {
+      const scope = createHash('sha256').update('ui-pairing:' + session).digest('base64url');
+      res.setHeader('X-Asterhelm-Pairing', scope);
+      if (req.headers['x-asterhelm-pairing'] && req.headers['x-asterhelm-pairing'] !== scope)
+        return json(409, { error: '配对已切换，请重新打开对话。' });
+    }
     const chunks = [];
     let size = 0;
     for await (const chunk of req) {

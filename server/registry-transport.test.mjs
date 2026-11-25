@@ -78,6 +78,10 @@ test('a CA-issued device joins, runs its configured adapter and cannot cross dev
   await assert.rejects(remote('studio','/worker/inventory',{target,observation:{subjectDeviceId:'other'}}),/subject does not match/i);
   await assert.rejects(remote('other','/worker/claim',{target}),/identity mismatch/i);
   await assert.rejects(remote('other','/contexts/plan',{deviceId:'studio',entries:[]}),/identity mismatch/i);
+  for(const path of ['catchUp','redeem','updates','ack','desktopCursors','desktopPage']){
+    await assert.rejects(remote('other','/contexts/'+path,{deviceId:'studio',target}),/identity mismatch/i);
+    await assert.rejects(remote('studio','/contexts/'+path,{target}),/does not own desktop sessions/i);
+  }
   await assert.rejects(remote('studio','/list'),/worker endpoint only/i);
   const {generation}=await remote('studio','/contexts/plan',{entries:[]});
   assert.equal((await remote('studio','/contexts/commit',{generation})).count,0);

@@ -54,6 +54,15 @@ test('phone routes keep existing sessions and expose only paired personal data',
     assert.equal((await post(route, data, existing, 'https://invalid.example')).status, 403);
     assert.deepEqual((await (await post(route, data)).json()).value, { route: '/' + route, data });
   }
+  const scope = (await post('history', {})).headers.get('X-Asterhelm-Pairing');
+  assert.ok(scope && scope !== existing);
+  assert.equal((await post('board', {})).headers.get('X-Asterhelm-Pairing'), scope);
+  assert.notEqual((await post('board', {}, auth.redeem(auth.invite()))).headers.get('X-Asterhelm-Pairing'), scope);
+  const stale = await fetch(base + '/api/chat', { method: 'POST',
+    headers: { 'Content-Type': 'application/json', Cookie: '__Host-sa=' + existing, Origin: phoneOrigin, 'X-Asterhelm-Pairing': 'previous-pairing' },
+    body: JSON.stringify({ text: 'stale composer', requestId: 'stale' }),
+  });
+  assert.equal(stale.status, 409);
   assert.equal((await (await post('workers', {})).json()).value, '/workers');
   const interval = setTimeout(() => { items = [{ id: 'message1', seq: 1, text: 'ready' }]; }, 80);
   t.after(() => clearTimeout(interval));

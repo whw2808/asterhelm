@@ -178,3 +178,33 @@ Replace `hub.codex` with the configured target. The connector reads compatible l
 Stop all processes before making a consistent filesystem backup of `ASTERHELM_HOME`. It contains SQLite databases and journals, job workspaces, phone session records, optional context snapshots, and optional private keys. A remote worker has its own state to back up.
 
 To exercise setup and enrollment on a development machine, run `node --test scripts/self-host.test.mjs`. It runs disposable services on loopback, generates a temporary test CA, and discards the state at the end. The suite exercises the first-run byte count over the local socket and mTLS, phone pairing, the board and logout. A synthetic HTTPS model endpoint dispatches a read-only task to a stand-in native executor and checks that its receipt reaches the conversation. A stand-in headless harness also checks DeepSeek worker configuration and the planner’s tool-disabling patch. The suite needs no external model or phone.
+
+### Continue linked work on a desktop
+
+On the phone, open a device's agent, choose a session and select **接着聊**. Later phone messages keep the same work binding, including after an Android restart. **加入当前工作** adds another explicitly chosen session. **退出接续** sends subsequent mobile messages to ordinary chat. New replies in the participating desktop session appear in mobile chat with their origin. Updating the Android client requires rebuilding and installing the APK. Existing pairing and earlier chat remain usable.
+
+Install the context connector described above on each participating device. A top-level desktop chat originally created through the desktop thread tool can be included by placing its exact ID in the connector configuration's optional `includedDesktopThreadIds` array. The local connector also reads `$ASTERHELM_HOME/context-local.json` when started without a configuration argument.
+
+The stock Codex client can look up linked decisions on the next prompt. Register the repository's `server/mcp.mjs` as a local Codex MCP server. Register `node /absolute/path/to/server/work-context.mjs` as a trusted synchronous command hook for `UserPromptSubmit` and optionally `SessionStart` on resume. Use absolute paths to your Node 24 executable and repository, and a short hook timeout such as three seconds. On a remote worker, set `ASTERHELM_WORKER_CONFIG` to that worker's private configuration for both processes. The hook gives the model a short-lived ticket scoped to the thread and authorized connector. The read-only `get_work_context` tool returns attributed work records. Codex hook trust and discovery are controlled by your desktop client. [Codex hook configuration](https://learn.chatgpt.com/docs/hooks)
+
+To send a **receipt turn** before the user types, enable the option in the desktop connector's private configuration.
+
+```json
+{
+  "codexContinuity": {
+    "mode": "receipt-turn",
+    "codexExecutable": "/absolute/path/to/codex",
+    "guardCommand": "/absolute/path/to/node /absolute/path/to/server/receipt-guard.mjs"
+  }
+}
+```
+
+This mode runs the official `codex queue` command for the selected existing thread. The owning client drains its queue, including when an already-open idle app receives an update. Offline or unopened threads may receive it later. Each batch requests one acknowledgment with the thread's configured model. A durable local claim prevents retries from queueing a duplicate after an ambiguous result. The phone shows **已送达桌面** only after the connector verifies the exact original note and acknowledgment in a completed turn with no extra work items. An unexpected reply or a tool call leaves the delivery unconfirmed. The command does not resume the thread on a second server. [Codex CLI reference](https://learn.chatgpt.com/docs/cli/reference)
+
+Receipt turns inherit the thread's tools. Register the exact `guardCommand` as a synchronous command hook for `UserPromptSubmit`, `PreToolUse`, and `Stop`, with no matcher. Give the guard the connector's Asterhelm state directory. For a custom receipt directory, set `ASTERHELM_RECEIPT_DIR` on the hook to the same path. Review and trust these three definitions in Codex. On desktop builds where **Settings → Hooks** is empty with a disabled reload button, open the local project folder first. The CLI also provides `/hooks` for review. [Codex hook configuration](https://learn.chatgpt.com/docs/hooks)
+
+Before each new batch the connector queries the effective hook definitions for the original thread's working directory. The default holds the receipt if a guard is missing, disabled, or awaiting trust. Opening a thread or using a tool to prime it is unnecessary. The guard verifies the local claim and denies supported tool calls for that receipt turn. The next ordinary user prompt uses the session's normal permissions. Local hooks cover selected Codex tool paths. The native transcript check also rejects completed receipts that contain other actions. For an isolated test deployment, explicitly setting `requireGuard` to `false` skips guard discovery. [Codex hook coverage](https://learn.chatgpt.com/docs/hooks#tool-coverage)
+
+A strictly passive note uses a separate client capability. In the tested stock Codex build, injecting items supplied model context without producing a visible transcript entry. Resuming an idle thread did not display a hook message before the next prompt. [Codex App Server](https://learn.chatgpt.com/docs/app-server)
+
+Clients that implement passive notes can configure `codexContinuity.socketPath` and `codexContinuity.noteWriter` in the worker's private configuration. The socket must be the public App Server Unix endpoint serving that native client. The local executable receives one JSON object on stdin with `operation: "putIfIdle"`, `socketPath`, `threadId`, `deliveryId` and `text`. It must atomically append one idempotent, model-visible and user-visible note to that idle original thread and return `{turnId,itemId}`. Asterhelm independently reads the matching visible thread item before acknowledging delivery. This release includes the verifier and connector contract. A compatible native note writer for stock Codex Desktop is not included.

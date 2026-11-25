@@ -1,4 +1,6 @@
 import {WorkJournal} from './personal-work.mjs';
+import {WorkContinuity} from './continuity.mjs';
+import {idPattern} from './context-format.mjs';
 import {DatabaseSync} from 'node:sqlite';
 import {randomUUID,createHash} from 'node:crypto';
 
@@ -26,27 +28,36 @@ export class PersonalStore {
       CREATE TABLE IF NOT EXISTS diagnostics(kind TEXT,id TEXT,PRIMARY KEY(kind,id));
       CREATE TABLE IF NOT EXISTS device_aliases(alias TEXT COLLATE NOCASE,scope TEXT,deviceId TEXT,source TEXT,PRIMARY KEY(alias,scope));
       CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);`);
-    this.work=new WorkJournal(this.db);
+    this.continuity=new WorkContinuity(this);
+    this.work=new WorkJournal(this.db,this.continuity);
   }
   transact(fn) {
     this.db.exec('BEGIN IMMEDIATE');
     try {const value=fn();this.db.exec('COMMIT');return value;}
     catch(e){this.db.exec('ROLLBACK');throw e;}
   }
-  receive({requestId,text,context}) {
+  receive({requestId,text,context,workId},selectedRow=null) {
     if(typeof requestId!=='string'||!requestId.trim()||requestId.length>150)throw Error('缺少有效消息编号');
     if(typeof text!=='string'||!text.trim()||text.length>16000)throw Error('请输入 1–16000 字的消息');
     text=text.trim();
     if(context!=null&&((typeof context.machine!=='string'||!/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$/.test(context.machine))||typeof context.id!=='string'||!/^[a-f0-9-]{36}$/i.test(context.id)))throw Error('无效的会话引用');
-    const signature=fingerprint(context?JSON.stringify([text,context.machine,context.id]):text);
+    if(workId!=null&&(!context||typeof workId!=='string'||!idPattern.test(workId)))throw Error('需要选择会话和有效的工作编号');
+    const parts=context?[text,context.machine,context.id]:null;
+    if(workId)parts.push(workId);
+    const signature=fingerprint(parts?JSON.stringify(parts):text);
     return this.transact(()=>{
       const old=this.db.prepare('SELECT * FROM turns WHERE requestId=?').get(requestId);
-      if(old){if(old.signature!==signature)throw Error('这条消息编号已经用于其他内容');return {id:old.id};}
+      if(old){
+        if(old.signature!==signature)throw Error('这条消息编号已经用于其他内容');
+        const linked=this.continuity.workForTurn(old.id);
+        return linked?{id:old.id,workId:linked}:{id:old.id};
+      }
       const id=randomUUID();
       this.message(id,'user',text);
       this.db.prepare("INSERT INTO turns(id,requestId,signature,state) VALUES(?,?,?,'new')").run(id,requestId,signature);
       if(context)this.db.prepare('INSERT INTO turn_sources VALUES(?,?,?)').run(id,context.machine,context.id);
-      return {id};
+      const linked=this.continuity.receive(id,text,context,selectedRow,workId);
+      return linked?{id,workId:linked}:{id};
     });
   }
   message(id,role,text,parent=null,notify=false) {
@@ -74,9 +85,14 @@ export class PersonalStore {
     }
     if(!rows)rows=this.db.prepare('SELECT * FROM messages WHERE '+shown+' AND seq<? ORDER BY seq DESC LIMIT ?').all(Number(before)||Number.MAX_SAFE_INTEGER,limit).reverse();
     const request=this.db.prepare('SELECT requestId FROM turns WHERE id=?');
-    for(const row of rows)if(row.role==='user'){
-      row.requestId=request.get(row.id)?.requestId;
-      const work=this.work.card(row.id);if(work)row.work=work;
+    for(const row of rows){
+      if(row.role==='user'){
+        row.requestId=request.get(row.id)?.requestId;
+        const work=this.work.card(row.id);if(work)row.work=work;
+        const continuity=this.continuity.status(row.id);if(continuity)row.continuity=continuity;
+      }else if(row.id.startsWith('desktop-')){
+        row.provenance=this.continuity.provenance(row.id);
+      }
     }
     return {messages:rows,pending:this.db.prepare("SELECT count(*) n FROM turns WHERE state!='done'").get().n+this.work.activeCount()};
   }
@@ -89,12 +105,14 @@ export class PersonalStore {
     return [...selected.values()].filter(r=>r.deviceId===deviceId).map(r=>r.alias);
   }
   sourceFor(turnId){return this.db.prepare('SELECT machine,sessionId AS id FROM turn_sources WHERE turnId=?').get(turnId);}
-  previous(seq) {
+  previous(seq,turnId) {
+    const workId=this.continuity.workForTurn(turnId??this.db.prepare('SELECT id FROM messages WHERE seq=?').get(seq)?.id??'');
     const sql=`SELECT role,substr(text,1,1100) text FROM messages WHERE seq<?
+      AND (? IS NULL OR EXISTS(SELECT 1 FROM continuity_turns w WHERE w.workId=? AND w.turnId=coalesce(messages.parent,messages.id)))
       AND NOT EXISTS(SELECT 1 FROM memory_exclusions WHERE memory_exclusions.id=messages.id)
       AND NOT EXISTS(SELECT 1 FROM diagnostics d WHERE d.kind='turn' AND (d.id=messages.id OR d.id=messages.parent))
       ORDER BY seq DESC LIMIT 14`;
-    return this.db.prepare(sql).all(seq).reverse();
+    return this.db.prepare(sql).all(seq,workId,workId).reverse();
   }
   notifications({after=0}={}) {
     const start=Math.max(0,Number(after)||0);
@@ -130,8 +148,12 @@ export class PersonalStore {
   }
   savePlan(turn,plan){this.db.prepare("UPDATE turns SET plan=?,state='planned',attempts=0,nextTry=0 WHERE id=?").run(JSON.stringify(plan),turn.id);}
   defer(turn){this.db.prepare('UPDATE turns SET attempts=attempts+1,nextTry=? WHERE id=?').run(Date.now()+Math.min(45000,3000*(turn.attempts+1)),turn.id);}
+  reply(id,turnId,answer,notify=false){
+    this.message(id,'assistant',answer,turnId,notify);
+    this.continuity.phoneReply(turnId,id,answer);
+  }
   finish(turn,answer,notify=false){
-    this.message('reply-'+turn.id,'assistant',answer,turn.id,notify);
+    this.reply('reply-'+turn.id,turn.id,answer,notify);
     this.db.prepare("UPDATE turns SET state='done',plan=NULL WHERE id=?").run(turn.id);
   }
   remember(turn,a){
@@ -142,6 +164,7 @@ export class PersonalStore {
     this.db.prepare('INSERT OR REPLACE INTO pref_provenance VALUES(?,?,?,?)').run(a.key,a.scope,turn.id,a.text);
     this.db.prepare(`INSERT INTO prefs(id,key,text,scope,source,updatedAt) VALUES(?,?,?,?,?,?)
       ON CONFLICT(key,scope) DO UPDATE SET text=excluded.text,source=excluded.source,updatedAt=excluded.updatedAt`).run(randomUUID(),a.key,a.text,a.scope,turn.id,iso());
+    this.continuity.redactMemory();
     return true;
   }
   markMemoryUsed(turn,pref){
@@ -163,6 +186,7 @@ export class PersonalStore {
     }
     this.db.prepare('DELETE FROM pref_provenance WHERE key=? AND scope=?').run(p.key,p.scope);
     this.db.prepare('INSERT OR REPLACE INTO forgotten_keys VALUES(?,?,?)').run(p.key,p.scope,turn.id);
+    this.continuity.redactMemory();
     return true;
   }
   link(turn,row){this.db.prepare('INSERT OR REPLACE INTO contextlinks VALUES(?,?,?,?)').run(row.machine+':'+row.id,row.machine,row.id,turn.id);}
