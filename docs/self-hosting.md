@@ -179,6 +179,16 @@ Stop all processes before making a consistent filesystem backup of `ASTERHELM_HO
 
 To exercise setup and enrollment on a development machine, run `node --test scripts/self-host.test.mjs`. It runs disposable services on loopback, generates a temporary test CA, and discards the state at the end. The suite exercises the first-run byte count over the local socket and mTLS, phone pairing, the board and logout. A synthetic HTTPS model endpoint dispatches a read-only task to a stand-in native executor and checks that its receipt reaches the conversation. A stand-in headless harness also checks DeepSeek worker configuration and the planner’s tool-disabling patch. The suite needs no external model or phone.
 
+### Change a job from the main conversation
+
+Send the original request and any change of scope in the same phone conversation. For example, a catalog can have a print assignment and a digital assignment. Sending “Pause the digital edition and continue the print edition” updates the goal and acceptance criteria on the existing work order. Its card shows the responsible device and agent, elapsed time, and whether a withdrawal is pending, the worker confirmed a stop, or the task was withdrawn before pickup. A late digital result is excluded from the revised delivery.
+
+The router keeps one transcript. Its DeepSeek Harness planner runs each inference with durable session storage disabled. Each work order records its goal, revisions, assignment IDs and receipts. External agent sessions can be linked to a work order. An update delivered to a linked desktop session still asks for an acknowledgment only. The phone can continue issuing work while that session waits for its user.
+
+After receiving results, the router checks the current acceptance criteria. It can request up to two additional assignments per order to address gaps, across all revisions combined. It may use remaining participants and their permitted modes. Write access for an adaptive step requires an active assignment authorized for writing in the current revision. A scope change can also explicitly authorize a fresh assignment. Worker restarts and late receipts are reconciled by assignment ID.
+
+The hub creates the new revision and receipt fields on startup. Existing orders start at revision zero. Older receipts preserve the available execution history and may lack a worker-confirmed stop. Upgrade the hub and install the rebuilt Android app over the existing build to show revised goals and task cards.
+
 ### Continue linked work on a desktop
 
 On the phone, open a device's agent, choose a session and select **接着聊**. Later phone messages keep the same work binding, including after an Android restart. **加入当前工作** adds another explicitly chosen session. **退出接续** sends subsequent mobile messages to ordinary chat. New replies in the participating desktop session appear in mobile chat with their origin. Updating the Android client requires rebuilding and installing the APK. Existing pairing and earlier chat remain usable.

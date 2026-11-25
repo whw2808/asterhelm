@@ -134,7 +134,7 @@ test('task cancellation requests, confirmed stops and filtered worker receipts s
     const [before]=s.continuity.pending('desk','desk.code');
     assert.match(before.text,/已请求停止/);assert.doesNotMatch(before.text,/已确认停止|fictional-only/);
     s.continuity.ack('desk',before,'desk.code');
-    s.work.observe({id:'stop',state:'cancelled'});
+    s.work.observe({id:'stop',state:'cancelled',cancelRequested:1,workerState:'cancelled'});
     s.work.observe({id:'output',state:'succeeded',result:'Chunk ID: DEMO\nProcess exited with code 0\nInternal diagnostic'});
     s.work.observe({id:'key',state:'succeeded',result:'Summary: access token = fictional-only'});
     const [after]=s.continuity.pending('desk','desk.code');

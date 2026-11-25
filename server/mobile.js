@@ -1,5 +1,5 @@
 import { Lexer } from './mobile-marked.mjs';
-import { ChatBinding } from './mobile-work.mjs';
+import { ChatBinding, liveWork, mergeWorkHistory, refreshOlderWork } from './mobile-work.mjs';
 
 const native = location.origin === 'https://appassets.androidplatform.net'
   ? (await import('/android-host.js')).default : null;
@@ -321,8 +321,7 @@ function markdown(text) {
   return body;
 }
 
-const workStates = { working: '处理中', synthesizing: '正在汇总', completed: '已完成', partial: '部分完成', cancelled: '已取消' };
-const liveWork = work => work?.state === 'working' || work?.state === 'synthesizing';
+const workStates = { working: '处理中', synthesizing: '正在汇总', paused: '已暂停', completed: '已完成', partial: '部分完成', cancelled: '已取消' };
 function elapsed(ms, precise) {
   ms = Math.max(0, ms);
   if (precise && ms < 1000) return ms + ' 毫秒';
@@ -386,7 +385,9 @@ async function loadWorkDetail(disclosure) {
     if (!disclosure.isConnected || detailLoads.get(disclosure) !== request) return;
     const currentState = rowState === 'offline' && detail.state === 'running' ? rowState : detail.state;
     const terminal = terminalWorkStates.has(currentState);
-    status.textContent = '任务状态 · ' + state(currentState);
+    if (currentState === 'cancelled') {
+      status.textContent = detail.workerState ? '执行端回执 · ' + state(detail.workerState) : '队列状态 · 已取消';
+    } else status.textContent = '任务状态 · ' + state(currentState);
     if (detail.result) result.replaceChildren(markdown(detail.result));
     else result.replaceChildren(node('p', terminal ? '执行端未返回正文。' : '等待执行端返回结果。', 'work-detail-empty'));
     if (terminal) disclosure.dataset.final = 'true';
@@ -420,15 +421,18 @@ function workSummary(task) {
   symbol.append(icon(task.kind === 'consult' ? 'lookup' : 'work'));
   const info = node('div');
   const identity = node('div', undefined, 'work-identity');
-  const stage = task.state === 'queued' && !task.queuedAt ? '待提交' : state(task.state);
+  let stage = state(task.state);
+  if (task.state === 'queued' && !task.queuedAt) stage = '待提交';
+  if (task.state === 'cancelled' && task.taskId) stage = '队列已取消';
   identity.append(node('strong', task.kind === 'consult' ? '只读查证' : '执行任务'), node('span', stage, 'work-stage'));
   const meta = node('div', undefined, 'work-meta');
   meta.append(node('span', [task.deviceName, task.agentName].filter(Boolean).join(' · ')));
-  const duration = taskElapsed(task);
-  if (duration) meta.append(duration);
+  meta.append(taskElapsed(task) || node('span', task.state === 'queued' && !task.queuedAt ? '尚未开始' : '用时未记录', 'work-elapsed'));
   info.append(identity, meta);
   main.append(symbol, info);
-  body.append(main, node('div', task.title, 'work-title'));
+  const title = node('div', undefined, 'work-title');
+  title.append(node('span', task.scope === 'paused' ? '范围已暂停' : '当前范围', 'work-scope'), document.createTextNode(' ' + (task.title || '')));
+  body.append(main, title);
   if (task.progress && task.progress !== stage) body.append(node('div', task.progress, 'work-progress'));
   return body;
 }
@@ -465,13 +469,22 @@ function workSentence(work) {
 function workPanel(work, panel) {
   if (!panel) {
     panel = node('section', undefined, 'work-panel');
+    panel.dataset.work = work.id;
     panel.setAttribute('aria-label', '任务进度');
     const heading = node('div', undefined, 'work-heading');
-    heading.append(avatar(), node('strong'), node('span', '', 'sr'));
+    const summary = node('div', undefined, 'work-overview');
+    summary.append(node('span', '', 'work-revision'), node('strong'), node('span', '', 'work-state'));
+    heading.append(avatar(), summary);
     panel.append(heading, node('ul', undefined, 'work-list'));
   }
-  panel.querySelector('.work-heading strong').textContent = workSentence(work);
-  panel.querySelector('.work-heading .sr').textContent = workStates[work.state] || state(work.state);
+  const revised = work.revision > 0;
+  const revision = panel.querySelector('.work-revision');
+  revision.hidden = !revised;
+  revision.textContent = revised ? '当前目标 · 第 ' + work.revision + ' 次调整' : '';
+  panel.querySelector('.work-heading strong').textContent = revised && work.goal ? work.goal : workSentence(work);
+  const status = panel.querySelector('.work-state');
+  status.textContent = workStates[work.state] || state(work.state);
+  status.classList.toggle('sr', !revised);
   const tasks = panel.querySelector('.work-list');
   const remaining = new Map(Array.from(tasks.children, card => [card.dataset.step, card]));
   for (const [index, task] of (work.tasks || []).entries()) {
@@ -480,6 +493,7 @@ function workPanel(work, panel) {
     const previousState = card.dataset.state;
     card.dataset.step = task.id;
     card.dataset.state = task.state;
+    card.dataset.scope = task.scope || 'active';
     let disclosure = card.querySelector('details');
     if (disclosure && disclosure.dataset.taskId !== task.taskId) { disclosure.remove(); disclosure = null; }
     if (task.taskId && !disclosure) { disclosure = workDisclosure(task); card.replaceChildren(disclosure); }
@@ -510,10 +524,6 @@ function historyMessage(item) {
     row.append(avatar(), bubble);
     message.append(row);
   }
-  if (isUser && item.work) {
-    message.classList.add('with-work');
-    message.append(workPanel(item.work));
-  }
   return message;
 }
 const shortTime = new Intl.DateTimeFormat('zh-CN',{hour: '2-digit', minute:'2-digit', hour12: false});
@@ -540,9 +550,7 @@ function renderHistory(value, prepend = false) {
   const page = value.messages || [];
   if (!transcript.length || prepend) historyStart = page.length < historyPageSize;
   const previous = new Map(transcript.map(message => [message.id, message]));
-  const entries = new Map(previous);
-  page.forEach(message => entries.set(message.id, message));
-  transcript = [...entries.values()].sort((left, right) => (left.seq ?? 0) - (right.seq ?? 0));
+  transcript = mergeWorkHistory(transcript, page);
   const list = transcript;
   $('earlier').hidden = historyStart || !list[0]?.seq;
   const signature = JSON.stringify(list);
@@ -552,17 +560,21 @@ function renderHistory(value, prepend = false) {
   if (changed) {
     const container = $('messages');
     const existing = new Map(Array.from(container.children, item => [item.dataset.id, item]));
+    const panels = new Map(Array.from(container.querySelectorAll('.work-panel'), panel => [panel.dataset.work, panel]));
     list.forEach((item, index) => {
       let message = existing.get(String(item.id));
       const old = previous.get(item.id);
       if (!message || JSON.stringify(old) !== JSON.stringify(item)) {
-        if (message && old?.work && item.work && item.role === 'user' && old.text === item.text && old.createdAt === item.createdAt && old.continuity?.delivery === item.continuity?.delivery) {
-          workPanel(item.work, message.querySelector('.work-panel'));
-        } else {
+        if (!message || old?.text !== item.text || old.role !== item.role || old.createdAt !== item.createdAt ||
+            old.provenance?.machine !== item.provenance?.machine || old.continuity?.delivery !== item.continuity?.delivery) {
           const next = historyMessage(item);
           message?.replaceWith(next);
           message = next;
         }
+        if (item.work) {
+          const panel = workPanel(item.work, panels.get(item.work.id));
+          if (panel.parentElement !== message) message.append(panel);
+        } else message.querySelector('.work-panel')?.remove();
       }
       const position = container.children[index] || null;
       if (position !== message) container.insertBefore(message, position);
@@ -818,18 +830,9 @@ $('back-board').onclick = () => {
   card?.focus({ preventScroll: true });
 };
 async function chatHistory(version) {
-  if (focusedId) return api('history', { around: focusedId, limit: historyPageSize });
-  const latest = await api('history');
-  const polled = new Set(latest.messages.map(message => message.id));
-  const older = new Set(transcript.filter(message => liveWork(message.work) && !polled.has(message.id)).map(message => message.id));
-  for (const id of older) {
-    if (version !== refreshVersion) break;
-    const window = await api('history', { around: id, limit: 9 });
-    for (const message of window.messages) {
-      if (older.delete(message.id)) latest.messages.push(message);
-    }
-  }
-  return latest;
+  const page = await api('history', focusedId ? { around: focusedId, limit: historyPageSize } : {});
+  await refreshOlderWork(page, transcript, id => api('history', { around: id, limit: 9 }), () => version === refreshVersion);
+  return page;
 }
 function resetHistory() {
   historySignature = ''; transcript = []; historyStart = false; pending = false;

@@ -68,6 +68,14 @@ export class PersonalStore {
   pending() {
     return this.db.prepare("SELECT t.*,m.text,m.seq FROM turns t JOIN messages m ON m.id=t.id WHERE t.state!='done' ORDER BY m.seq LIMIT 1").get();
   }
+  heldForInput(parent) {
+    // A phone message may revise the result that is being synthesized. Let the
+    // router classify it first. Other explicitly linked works stay independent.
+    return Boolean(this.db.prepare(`SELECT 1 FROM messages original JOIN messages newer ON newer.seq>original.seq
+      JOIN turns t ON t.id=newer.id LEFT JOIN continuity_turns linked ON linked.turnId=t.id
+      LEFT JOIN continuity_turns origin ON origin.turnId=original.id WHERE original.id=?
+      AND t.state!='done' AND (linked.workId IS NULL OR linked.workId=origin.workId) LIMIT 1`).get(parent));
+  }
   visibleTasks(items){
     const ignored=new Set(this.db.prepare("SELECT id FROM diagnostics WHERE kind='task'").all().map(r=>r.id));
     return items.filter(t=>!ignored.has(t.id));
@@ -90,6 +98,9 @@ export class PersonalStore {
         row.requestId=request.get(row.id)?.requestId;
         const work=this.work.card(row.id);if(work)row.work=work;
         const continuity=this.continuity.status(row.id);if(continuity)row.continuity=continuity;
+      }else if(row.id.startsWith('reply-')){
+        const revision=this.db.prepare('SELECT parent FROM work_revisions WHERE turnId=?').get(row.parent);
+        if(revision)row.work=this.work.card(revision.parent);
       }else if(row.id.startsWith('desktop-')){
         row.provenance=this.continuity.provenance(row.id);
       }

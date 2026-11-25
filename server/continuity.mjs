@@ -121,11 +121,15 @@ export class WorkContinuity {
       for(const e of row?.evidence||[])boundAt=Math.max(boundAt,Date.parse(e.at)||0);
       this.db.prepare('INSERT INTO continuity_participants(workId,machine,target,id,boundAt) VALUES(?,?,?,?,?)').run(workId,context.machine,target,context.id,boundAt);
     }
+    this.recordPhoneTurn(turnId,text,workId);
+    return workId;
+  }
+  recordPhoneTurn(turnId,text,workId){
+    if(!workId||this.workForTurn(turnId))return;
     this.db.prepare('INSERT INTO continuity_turns VALUES(?,?)').run(turnId,workId);
     const summary=compact(text,390);
     if(summary)this.db.prepare(`INSERT INTO continuity_events(workId,turnId,eventKey,source,text) VALUES(?,?,?,'手机',?)`)
       .run(workId,turnId,JSON.stringify(['phone',turnId]),summary);
-    return workId;
   }
   task(step,phase,answer=''){
     const workId=this.workForTurn(step.parent);
