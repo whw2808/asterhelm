@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { ChatBinding, mergeWorkHistory, refreshOlderWork } from './mobile-work.mjs';
+import { ChatBinding, cardRequest, chatDisplayText, mergeWorkHistory, refreshOlderWork } from './mobile-work.mjs';
 
 const alpha = { machine: 'studio', id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', title: 'Atlas' };
 const beta = { machine: 'lab', id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', title: 'Birch' };
@@ -98,4 +98,85 @@ test('polling an older card continues until a paused step has its execution rece
   const updated = mergeWorkHistory(older, page.messages);
   await refreshOlderWork({ messages: [page.messages[0]] }, updated, id => requests.push(id));
   assert.deepEqual(requests, []);
+});
+
+const openCard = { id: 'candidate:iris-2', messageId: 'discovery', kind: 'candidate', version: 2,
+  title: '核对展品目录', status: 'waiting', detail: '已找到两份目录。', actions: [
+    { decision: 'approve', label: '同意立项' }, { decision: 'ignore', label: '忽略' }] };
+
+test('a card decision has one unbound request identity on retry and its chat text names the decision', async () => {
+  const send = await cardRequest(openCard, 'approve');
+  assert.equal(send.text, '星舵操作 candidate:iris-2 v2 approve');
+  assert.deepEqual(Object.keys(send).sort(), ['requestId', 'text']);
+  assert.ok(send.requestId.length <= 150);
+  assert.deepEqual(await cardRequest(structuredClone(openCard), 'approve'), send);
+  assert.notEqual((await cardRequest({ ...openCard, version: 3 }, 'approve')).requestId, send.requestId);
+  assert.notEqual((await cardRequest(openCard, 'ignore')).requestId, send.requestId);
+  const cards = new Map([[openCard.id, openCard]]);
+  const displayed = chatDisplayText(send.text, cards);
+  assert.match(displayed, /同意立项/);
+  assert.match(displayed, /核对展品目录/);
+  assert.doesNotMatch(displayed, /candidate:iris|v2/);
+  assert.doesNotMatch(chatDisplayText(send.text), /candidate:iris/);
+  const quotation = '请解释「' + send.text + '」。';
+  assert.equal(chatDisplayText(quotation, cards), quotation);
+});
+
+test('actions can only submit an offered decision for a single identified version', async () => {
+  for (const [card, decision] of [
+    [openCard, 'pause'], [openCard, 'write'], [{ ...openCard, id: 'two ids' }, 'approve'],
+    [{ ...openCard, id: 'a'.repeat(161) }, 'approve'], [{ ...openCard, version: 0 }, 'approve'],
+    [{ ...openCard, version: 1.2 }, 'approve'], [{ ...openCard, version: 1000000000 }, 'approve'],
+  ]) assert.equal(await cardRequest(card, decision), null);
+});
+
+test('older history cannot re-enable an obsolete decision or copy its card onto a later turn', () => {
+  const discovery = { id: 'discovery', seq: 3, proactive: [openCard] };
+  const approved = { ...openCard, status: 'approved', version: 3, actions: [] };
+  const other = { id: 'later', seq: 8, proactive: [openCard] };
+  const fresh = mergeWorkHistory([discovery], [{ ...discovery, proactive: [approved] }, other]);
+  assert.deepEqual(fresh.flatMap(row => (row.proactive || []).map(card => [row.id, card.status])), [['discovery', 'approved']]);
+  const merged = mergeWorkHistory(fresh, [discovery]);
+  assert.deepEqual(merged[0].proactive, [approved]);
+  assert.equal(mergeWorkHistory(merged, [{ id: 'discovery', seq: 3 }])[0].proactive, undefined);
+});
+
+test('a rule can change its last occurrence without changing the user grant version', () => {
+  const card = { ...openCard, kind: 'rule', status: 'active', detail: '已登记' };
+  const row = { id: 'discovery', seq: 3, proactive: [card] };
+  const updated = { ...card, detail: '已核对第一份目录' };
+  const fresh = mergeWorkHistory([row], [{ ...row, proactive: [updated] }]);
+  assert.deepEqual(fresh[0].proactive, [updated]);
+  assert.deepEqual(mergeWorkHistory(fresh, [row], true)[0].proactive, [updated]);
+});
+
+test('old window polling updates active proposals and rules on their original rows, skipping settled cards', async () => {
+  const row = (id, kind, status) => ({ id, proactive: [{ ...openCard, id: 'card-' + id, messageId: id, kind, status }] });
+  const rows = [row('a', 'candidate', 'waiting'), row('b', 'rule', 'paused'), row('c', 'rule', 'cancelled'),
+    row('d', 'candidate', 'ignored'), row('e', 'rule', 'active')];
+  const page = { messages: [rows[4]] };
+  const seen = [];
+  await refreshOlderWork(page, rows, async id => { seen.push(id); return { messages: rows.slice(0, 2) }; });
+  assert.deepEqual(seen, ['a']);
+  assert.deepEqual(page.messages.map(row => row.id), ['e', 'a', 'b']);
+});
+
+test('a stopped card with an in-flight check continues polling for its final receipt', async () => {
+  const stopped = { ...openCard, status: 'ignored', actions: [], startedAt: '2026-01-01T12:00:00Z' };
+  const original = { id: stopped.messageId, seq: 3, proactive: [stopped] };
+  const final = { ...original, proactive: [{ ...stopped, finishedAt: '2026-01-01T12:00:04Z' }] };
+  const page = { messages: [] };
+  await refreshOlderWork(page, [original], async () => ({ messages: [final] }));
+  assert.deepEqual(page.messages, [final]);
+  await refreshOlderWork({ messages: [] }, page.messages, () => assert.fail('settled card polled'));
+});
+
+test('reading earlier history cannot replace a fresher next wake on the same unchanged work revision', () => {
+  const work = { id: 'work-books', revision: 1, state: 'working', updatedAt: '2026-01-01T12:00:00Z',
+    nextWakeAt: '2026-01-01T13:00:00Z', wakeReason: '等待纸本回执' };
+  const older = { id: 'books', seq: 4, work };
+  const refreshed = { ...older, work: { ...work, nextWakeAt: '2026-01-01T14:00:00Z', wakeReason: '设备离线，稍后检查' } };
+  const current = mergeWorkHistory([older], [refreshed]);
+  assert.deepEqual(current[0].work, refreshed.work);
+  assert.deepEqual(mergeWorkHistory(current, [older], true)[0].work, refreshed.work);
 });

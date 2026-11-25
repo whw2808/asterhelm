@@ -93,7 +93,8 @@ async function submitFollowUp(agent,turn,action){
 export async function deliverWork(agent){
   const {store,planner}=agent,work=store.work;
   const turn=work.ready(id=>store.heldForInput?.(id));if(!turn)return;
-  const criteria=JSON.parse(turn.criteria);
+  const criteria=JSON.parse(turn.criteria),ongoing=agent.workWake?.goal(turn.id);
+  let facts;
   try{
     if(turn.decision){await submitFollowUp(agent,turn,JSON.parse(turn.decision));return;}
     const assignments=work.evidence(turn.id);
@@ -107,20 +108,29 @@ export async function deliverWork(agent){
     }
     if(!steps.length){work.setState(turn.id,'paused');return;}
     const results=steps.map(s=>({id:s.taskId||s.id,device:s.deviceName,agent:s.agentName,state:s.state,title:s.title,result:clipped(s.result,14000)}));
+    if(ongoing){
+      const desktops=agent.workWake.desktopResults(turn.id,assignments);
+      facts=agent.workWake.facts(turn,assignments,desktops);
+      if(!store.transact(()=>agent.workWake.beforeAssessment(turn,facts)))return;
+      results.push(...desktops);
+    }
     work.setState(turn.id,'synthesizing');
     const workers=await agent.broker('/workers');
     if(!current(store,turn))return;
     const eligible=eligibleWorkers(workers,steps,turn.revision);
-    const canConsult=turn.round<2&&eligible.length>0;
+    if(ongoing&&turn.round>=2)for(const worker of eligible)worker.modes=worker.modes.filter(mode=>mode==='read-only');
+    const canConsult=Boolean(turn.round<2||ongoing)&&eligible.some(w=>w.modes.length);
     const question=turn.goal??turn.text;
     const output=await planner.plan({phase:'delivery',originalQuestion:question,amendment:turn.amendment,revision:turn.revision,
+      ...(ongoing?{ongoingGoal:{instruction:ongoing.instruction,stopCondition:ongoing.stopCondition}}:{}),
       criteria,results,scopeReceipts,canConsult,workers:eligible,preferences:store.preferences().map(p=>({text:p.text,scope:p.scope})),
       requestedFormat:'用用户的语言。先给结论，解释比较对象各自的具体依据和差别，只在当前证据支持的范围内作答。'});
     if(!current(store,turn))return;
     const coverage=reviewCoverage(criteria,output.coverage,results,scopeReceipts);
     const missing=coverage.filter(r=>!r.answered);
     const follow=output.actions?.length===1?output.actions[0]:null;
-    if(missing.length&&canConsult&&['consult','dispatch'].includes(follow?.type)){
+    const needsUser=ongoing&&(output.awaitingUser===true||/(?:^|[。！？\n])\s*(?:请你|需要你|等待你)(?:批准|授权|确认|决定|提供)|(?:^|[.!?]\s+)(?:please (?:approve|authorize)|waiting for your (?:approval|decision))/iu.test(output.reply||''));
+    if(missing.length&&!needsUser&&canConsult&&['consult','dispatch'].includes(follow?.type)){
       const mode=follow.write===true?'workspace-write':'read-only';
       const worker=eligible.find(w=>w.target===follow.target&&w.modes.includes(mode));
       if(worker&&(follow.write==null||typeof follow.write==='boolean')&&(follow.type==='dispatch'||mode==='read-only')&&typeof follow.prompt==='string'&&follow.prompt.trim()){
@@ -139,10 +149,18 @@ export async function deliverWork(agent){
     if(!reply)throw Error('Missing synthesized answer');
     const unsupported=missing.filter(m=>!reply.includes(m.finding));
     const note=unsupported.length?'\n\n**仍待核实**\n'+unsupported.map(m=>'- '+m.item+'：'+m.finding).join('\n'):'';
+    if(ongoing&&missing.length){
+      const outside=follow&&['consult','dispatch'].includes(follow.type)&&!eligible.some(w=>w.target===follow.target&&w.modes.includes(follow.write===true?'workspace-write':'read-only'));
+      const hold=Boolean(needsUser||outside);
+      const reason=(reply+note).slice(0,4000)+(hold?'\n等待你的决定。':'\n将按当前工作范围复查。');
+      store.transact(()=>{if(current(store,turn))agent.workWake.waitForEvidence(turn,facts,reason,coverage,hold);});return;
+    }
     finish(store,turn,missing.length?'partial':'completed',reply+note,coverage);
   }catch(e){
     if(!current(store,turn))return;
-    if(!turn.decision&&turn.failures>=3){
+    if(ongoing&&!turn.decision&&turn.failures>=3){
+      store.transact(()=>{if(current(store,turn))agent.workWake.waitForEvidence(turn,facts||ongoing.lastFacts||'', '暂未取得可验证的判断，已安排复查。');});
+    }else if(!turn.decision&&turn.failures>=3){
       finish(store,turn,'partial','已保存执行回执。总控暂时未能完成以下交付：\n'+criteria.map(x=>'- '+x).join('\n')+'\n可在原对话要求继续核对。');
     }else work.retry(turn.id,turn.failures);
     console.error('personal delivery retry:',e.name,String(e.message).slice(0,90));

@@ -257,6 +257,8 @@ public final class MainActivity extends Activity {
         result.put("binding", binding.isEmpty() ? JSONObject.NULL : new JSONObject(binding));
         String pending = Vault.read(this, "unsent");
         result.put("pending", pending.isEmpty() ? JSONObject.NULL : new JSONObject(pending));
+        String pendingCard = Vault.read(this, "unsentCard");
+        result.put("pendingCard", pendingCard.isEmpty() ? JSONObject.NULL : new JSONObject(pendingCard));
         result.put("pendingTitle", Vault.read(this, "unsentContextTitle"));
         JSONObject snapshot = typed;
         result.put("typedDraft", snapshot == null ? JSONObject.NULL : snapshot.optString("text"));
@@ -264,10 +266,13 @@ public final class MainActivity extends Activity {
         return result;
     }
     private void acknowledge(String id) throws Exception {
-        String cached = Vault.read(this, "unsent");
-        if (!id.isEmpty() && !cached.isEmpty() && id.equals(new JSONObject(cached).optString("requestId"))) {
-            Vault.write(this, "unsent", "");
-            Vault.write(this, "unsentContextTitle", "");
+        if (id.isEmpty()) return;
+        for (String slot : new String[]{"unsent", "unsentCard"}) {
+            String cached = Vault.read(this, slot);
+            if (!cached.isEmpty() && id.equals(new JSONObject(cached).optString("requestId"))) {
+                Vault.write(this, slot, "");
+                if ("unsent".equals(slot)) Vault.write(this, "unsentContextTitle", "");
+            }
         }
     }
     private JSONObject execute(String op, JSONObject body, String title) throws Exception {
@@ -279,13 +284,14 @@ public final class MainActivity extends Activity {
                 if (text.trim().isEmpty() || text.length() > 16000 || id.isEmpty() || id.length() > 150)
                     throw new Api.Failure(400, "消息内容或编号无效。");
                 JSONObject payload = Api.args("text", text, "requestId", id);
-                JSONObject context = body.optJSONObject("context");
+                boolean cardAction = body.optBoolean("cardAction");
+                JSONObject context = cardAction ? null : body.optJSONObject("context");
                 if (context != null) payload.put("context", Api.args("machine", context.getString("machine"), "id", context.getString("id")));
                 if (context != null && body.has("workId")) payload.put("workId", body.getString("workId"));
                 JSONObject pending = new JSONObject(payload.toString());
                 if (context != null && body.has("bindingId")) pending.put("bindingId", body.getString("bindingId"));
-                Vault.write(this, "unsentContextTitle", title);
-                Vault.write(this, "unsent", pending.toString());
+                if (!cardAction) Vault.write(this, "unsentContextTitle", title);
+                Vault.write(this, cardAction ? "unsentCard" : "unsent", pending.toString());
                 // Keep the idempotency key until the composer reconciles the accepted message.
                 return Api.call(this, "chat", payload);
             case "history":

@@ -1,5 +1,5 @@
 import { Lexer } from './mobile-marked.mjs';
-import { ChatBinding, liveWork, mergeWorkHistory, refreshOlderWork } from './mobile-work.mjs';
+import { ChatBinding, cardCommand, cardRequest, chatDisplayText, liveWork, mergeWorkHistory, refreshOlderWork } from './mobile-work.mjs';
 
 const native = location.origin === 'https://appassets.androidplatform.net'
   ? (await import('/android-host.js')).default : null;
@@ -44,7 +44,7 @@ function store(key, value, durable = false) {
   } catch {}
 }
 let view = 'loading', timer, clockTimer, refreshVersion = 0, viewVersion = 0, sending = false, pending = false;
-let historySignature = '', boardSignature = '', draft = null;
+let historySignature = '', boardSignature = '', draft = null, pendingCard = null;
 let transcript = [], historyStart = false, loadingEarlier = false, following = true;
 let focusedId = '', needsFocus = false, authenticated = false, composing = false;
 const historyPageSize = 80;
@@ -125,8 +125,9 @@ function changeView(to) {
     else $('tab-' + tab).removeAttribute('aria-current');
   }
 }
-async function api(path, body = {}) {
-  if (native) return native.call(path, body, path === 'chat' ? binding.current?.title || '' : '');
+async function api(path, body = {}, fromCard = false) {
+  if (native && path === 'chat') return native.chat(body, binding.current?.title || '', fromCard);
+  if (native) return native.call(path, body);
   let response;
   try {
     const headers = { 'Content-Type': 'application/json' };
@@ -163,8 +164,8 @@ function showPair() {
   changeView(native ? 'loading' : 'pair');
   if ($('source-dialog').open) $('source-dialog').close();
   $('source-path').value = ''; $('record-list').replaceChildren();
-  binding = new ChatBinding(); showBinding(); draft = null;
-  store('personal-chat-context', null, true); store('personal-chat-pending', null); store('personal-chat-input', null);
+  binding = new ChatBinding(); showBinding(); draft = pendingCard = null;
+  store('personal-chat-context', null, true); store('personal-chat-pending', null); store('personal-card-pending', null); store('personal-chat-input', null);
   pairing = '';
   $('message').value = ''; updateSend(); resetHistory();
   boardSignature = '';
@@ -200,6 +201,11 @@ $('pair-form').onsubmit = async event => {
 };
 function updateSend() {
   $('send').disabled = !authenticated || sending || changingBinding || !$('message').value.trim();
+  for (const button of $('messages').querySelectorAll('.proactive-actions button')) {
+    button.disabled = !authenticated || sending || changingBinding;
+    const label = (button.dataset.command === pendingCard?.text && !sending ? '重试 · ' : '') + button.dataset.label;
+    if (button.textContent !== label) button.textContent = label;
+  }
   const field = $('message');
   field.style.height = 'auto';
   field.style.height = field.scrollHeight + 'px';
@@ -459,6 +465,7 @@ function workSentence(work) {
   const tasks = work.tasks || [];
   const devices = [...new Set(tasks.map(task => task.deviceName).filter(Boolean))].join('、');
   if (work.state === 'synthesizing') return '正在汇总执行结果。';
+  if (work.state === 'paused') return '这项工作已暂停。';
   if (work.state === 'partial') return '部分工作已完成。';
   if (work.state === 'cancelled') return '这项工作已取消。';
   if (work.state === 'completed') return '这项工作已完成。';
@@ -473,7 +480,7 @@ function workPanel(work, panel) {
     panel.setAttribute('aria-label', '任务进度');
     const heading = node('div', undefined, 'work-heading');
     const summary = node('div', undefined, 'work-overview');
-    summary.append(node('span', '', 'work-revision'), node('strong'), node('span', '', 'work-state'));
+    summary.append(node('span', '', 'work-revision'), node('strong'), node('span', '', 'work-state'), node('div', '', 'work-next'));
     heading.append(avatar(), summary);
     panel.append(heading, node('ul', undefined, 'work-list'));
   }
@@ -485,6 +492,10 @@ function workPanel(work, panel) {
   const status = panel.querySelector('.work-state');
   status.textContent = workStates[work.state] || state(work.state);
   status.classList.toggle('sr', !revised);
+  const next = panel.querySelector('.work-next');
+  const wake = liveWork(work) && stamp(work.nextWakeAt);
+  next.hidden = !wake;
+  next.textContent = wake ? ['下次检查 ' + wake, work.wakeReason].filter(Boolean).join(' · ') : '';
   const tasks = panel.querySelector('.work-list');
   const remaining = new Map(Array.from(tasks.children, card => [card.dataset.step, card]));
   for (const [index, task] of (work.tasks || []).entries()) {
@@ -506,17 +517,91 @@ function workPanel(work, panel) {
   for (const card of remaining.values()) card.remove();
   return panel;
 }
-function historyMessage(item) {
+const cardKinds = { candidate: '发现事项', rule: '常驻委托', work: '工作接续' };
+const cardStatuses = { checking: '只读查证中', waiting: '等待决定', ignored: '已忽略', approved: '已立项',
+  active: '已登记', blocked: '待处理', ...workStates };
+
+// The server also keeps a plain-text report for older clients and notifications.
+function candidateReport(item) {
+  return item?.role === 'assistant' && item.proactive?.some(card =>
+    card.kind === 'candidate' && card.messageId === item.id && item.id === 'candidate-' + card.id) === true;
+}
+
+const renderedCards = new WeakMap();
+function renderProactive(message, item) {
+  const existing = new Map(Array.from(message.querySelectorAll('.proactive-card'), panel => [panel.dataset.card, panel]));
+  for (const card of item.proactive || []) {
+    const panel = existing.get(card.id) || node('section', undefined, 'proactive-card');
+    existing.delete(card.id);
+    const showTitle = card.title && !(item.role === 'user' && item.text === card.title);
+    const signature = JSON.stringify([card, showTitle]);
+    if (renderedCards.get(panel) !== signature) {
+      renderedCards.set(panel, signature);
+      panel.dataset.card = card.id;
+      panel.setAttribute('aria-label', [cardKinds[card.kind], card.title].filter(Boolean).join(' · '));
+      const heading = node('div', undefined, 'work-identity');
+      heading.append(node('span', cardKinds[card.kind] || '工作进度'), node('span', cardStatuses[card.status] || state(card.status), 'work-stage'));
+      panel.replaceChildren(heading);
+      if (showTitle) panel.append(node('strong', card.title));
+      const detail = (card.detail || '').split('\n').filter(line => line !== '建议：' + card.nextStep).join('\n');
+      if (detail) panel.append(node('p', detail, 'proactive-detail'));
+      if (card.kind === 'candidate' && ['waiting','approved'].includes(card.status)) {
+        if (card.goal) panel.append(node('p', '目标 · ' + card.goal, 'proactive-detail'));
+        if (card.criteria?.length) panel.append(node('p', '验收 · ' + card.criteria.join('\n'), 'proactive-detail'));
+        if (card.nextStep) panel.append(node('p', (card.status === 'approved' ? '已同意的下一步 · ' : '建议 · ') + card.nextStep, 'proactive-detail'));
+      }
+      const meta = node('div', undefined, 'work-meta');
+      const owner = [card.deviceName, card.agentName].filter(Boolean).join(' · ');
+      if (owner) meta.append(node('span', owner));
+      const duration = taskElapsed({ startedAt: card.startedAt, finishedAt: card.finishedAt,
+        state: card.status === 'checking' ? 'running' : card.status });
+      if (duration) meta.append(duration);
+      if (meta.childElementCount) panel.append(meta);
+      if (card.kind === 'rule' && (card.finishedAt || card.startedAt)) {
+        panel.append(node('div', (card.finishedAt ? '最近结束 ' : '最近开始 ') + stamp(card.finishedAt || card.startedAt), 'work-next'));
+      }
+      if (card.nextAt && ['active','working','checking'].includes(card.status)) {
+        panel.append(node('div', '下次检查 ' + stamp(card.nextAt), 'work-next'));
+      }
+      const actions = node('div', undefined, 'proactive-actions');
+      for (const action of card.actions || []) {
+        const command = cardCommand(card, action.decision);
+        if (!command) continue;
+        const button = node('button', action.label, 'quiet');
+        button.type = 'button';
+        button.dataset.command = command;
+        button.dataset.label = action.label;
+        button.onclick = async () => {
+          if (!authenticated || sending) return;
+          try {
+            const request = await cardRequest(card, action.decision);
+            if (button.isConnected && request) await sendChat(request, true);
+          } catch (error) { fail(error); }
+        };
+        actions.append(button);
+      }
+      if (actions.childElementCount) panel.append(actions);
+    }
+    if (panel.parentElement !== message) message.append(panel);
+  }
+  for (const panel of existing.values()) panel.remove();
+}
+
+function historyMessage(item, displayText) {
   const isUser = item.role === 'user';
   const message = node('article', undefined, 'message' + (isUser ? ' user' : ''));
   message.dataset.id = item.id;
   const speaker = isUser ? '你' : item.provenance ? '桌面 · ' + target(item.provenance.machine) : '个人助手';
   message.setAttribute('aria-label', [speaker, stamp(item.createdAt)].filter(Boolean).join(' · '));
   if (isUser) {
-    message.append(node('p', item.text, 'user-bubble'));
+    message.append(node('p', displayText, 'user-bubble'));
     if (item.continuity?.delivery === 'pending' || item.continuity?.delivery === 'delivered') {
       message.append(node('p', item.continuity.delivery === 'pending' ? '桌面待送达' : '已送达桌面', 'work-receipt'));
     }
+  } else if (candidateReport(item)) {
+    const mark = avatar();
+    mark.classList.add('discovery-avatar');
+    message.append(mark);
   } else {
     const row = node('div', undefined, 'reply-row');
     const bubble = markdown(item.text);
@@ -550,7 +635,7 @@ function renderHistory(value, prepend = false) {
   const page = value.messages || [];
   if (!transcript.length || prepend) historyStart = page.length < historyPageSize;
   const previous = new Map(transcript.map(message => [message.id, message]));
-  transcript = mergeWorkHistory(transcript, page);
+  transcript = mergeWorkHistory(transcript, page, prepend);
   const list = transcript;
   $('earlier').hidden = historyStart || !list[0]?.seq;
   const signature = JSON.stringify(list);
@@ -558,16 +643,21 @@ function renderHistory(value, prepend = false) {
   pending = Boolean(value.pending);
   const changed = signature !== historySignature;
   if (changed) {
+    const cards = transcriptCards();
     const container = $('messages');
     const existing = new Map(Array.from(container.children, item => [item.dataset.id, item]));
     const panels = new Map(Array.from(container.querySelectorAll('.work-panel'), panel => [panel.dataset.work, panel]));
     list.forEach((item, index) => {
       let message = existing.get(String(item.id));
       const old = previous.get(item.id);
-      if (!message || JSON.stringify(old) !== JSON.stringify(item)) {
-        if (!message || old?.text !== item.text || old.role !== item.role || old.createdAt !== item.createdAt ||
+      const displayText = item.role === 'user' ? chatDisplayText(item.text, cards) : item.text;
+      const textChanged = item.role === 'user' && message?.querySelector('.user-bubble')?.textContent !== displayText;
+      if (!message || textChanged || JSON.stringify(old) !== JSON.stringify(item)) {
+        const report = candidateReport(item);
+        if (!message || textChanged || candidateReport(old) !== report || (!report && old?.text !== item.text) ||
+            old.role !== item.role || old.createdAt !== item.createdAt ||
             old.provenance?.machine !== item.provenance?.machine || old.continuity?.delivery !== item.continuity?.delivery) {
-          const next = historyMessage(item);
+          const next = historyMessage(item, displayText);
           message?.replaceWith(next);
           message = next;
         }
@@ -575,17 +665,20 @@ function renderHistory(value, prepend = false) {
           const panel = workPanel(item.work, panels.get(item.work.id));
           if (panel.parentElement !== message) message.append(panel);
         } else message.querySelector('.work-panel')?.remove();
+        renderProactive(message, item);
       }
       const position = container.children[index] || null;
       if (position !== message) container.insertBefore(message, position);
       updateDate(message, item, list[index - 1]);
     });
     historySignature = signature;
+    updateSend();
   }
   const accepted = draft && list.find(item => item.requestId === draft.requestId);
   if (accepted) {
     acceptDraft(draft, accepted.continuity?.workId);
   }
+  if (pendingCard && list.some(item => item.requestId === pendingCard.requestId)) acceptCard(pendingCard);
   $('welcome').hidden = list.length > 0 || pending;
   $('thinking').hidden = Number(value.pending || 0) <= list.filter(item => liveWork(item.work)).length;
   refreshClocks();
@@ -851,6 +944,7 @@ async function restoreInput() {
   if (authenticated || !['chat','board'].includes(view)) return;
   if (native && !snapshot?.paired) throw Object.assign(Error('请重新连接设备。'), { status: 401 });
   draft = native ? snapshot.pending : stored('personal-chat-pending');
+  pendingCard = native ? snapshot.pendingCard : stored('personal-card-pending');
   binding = new ChatBinding(native ? snapshot.binding : stored('personal-chat-context', true));
   const typed = native
     ? { text: snapshot.typedDraft, bindingId: snapshot.typedContext?.bindingId, context: snapshot.typedContext }
@@ -920,16 +1014,21 @@ async function refresh() {
     if (version === refreshVersion) fail(error);
   } finally {
     if (version === refreshVersion && !document.hidden) {
-      timer = setTimeout(refresh, retrySoon ? 12000 : view === 'chat' ? (pending ? 2200 : 15000) : 30000);
+      const checking = transcript.some(row => row.proactive?.some(card => card.status === 'checking'));
+      timer = setTimeout(refresh, retrySoon ? 12000 : view === 'chat' ? (pending || checking ? 2200 : 15000) : 30000);
     }
   }
 }
+function transcriptCards() {
+  return new Map(transcript.flatMap(row => (row.proactive || []).map(card => [card.id, card])));
+}
 function drawRecords() {
+  const cards = transcriptCards();
   const records = transcript.filter(item => item.role === 'user').reverse();
   const rows = records.map(item => {
     const entry = node('button');
     entry.type = 'button';
-    entry.append(node('span', item.text, 'record-title'), node('time', stamp(item.createdAt)));
+    entry.append(node('span', chatDisplayText(item.text, cards), 'record-title'), node('time', stamp(item.createdAt)));
     entry.onclick = () => {
       closePanels();
       showHighlighted(item.id);
@@ -1028,24 +1127,36 @@ function acceptDraft(request, workId) {
   if (native) Promise.resolve(saved).then(() => native.acknowledge(request.requestId)).catch(fail);
   store('personal-chat-pending', null); draft = null; rememberInput(); updateSend();
 }
-$('composer').onsubmit = async event => {
-  event.preventDefault();
-  const text = $('message').value.trim();
-  if (!authenticated || !text || sending || changingBinding || composing) return;
-  const request = binding.request(text, draft);
-  draft = request;
-  if (!native) store('personal-chat-pending', request);
+function acceptCard(request) {
+  if (pendingCard !== request) return;
+  pendingCard = null;
+  if (native) native.acknowledge(request.requestId).catch(fail);
+  else store('personal-card-pending', null);
+  updateSend();
+}
+async function sendChat(request, fromCard = false) {
+  if (!authenticated || sending || changingBinding) return;
+  if (fromCard) pendingCard = request; else draft = request;
+  if (!native) store(fromCard ? 'personal-card-pending' : 'personal-chat-pending', request);
   sending = true; updateSend(); notice('');
   try {
     const { bindingId, ...payload } = request;
-    const result = await api('chat', native ? request : payload);
-    acceptDraft(request, result?.workId);
-    if (view === 'chat' && focusedId) await openLatest();
-    else {
-      if (view === 'chat') { following = true; $('conversation').scrollTop = $('conversation').scrollHeight; }
-      await refresh();
+    const result = await api('chat', native ? request : payload, fromCard);
+    if (fromCard) acceptCard(request);
+    else acceptDraft(request, result?.workId);
+    if (!fromCard && view === 'chat') {
+      if (focusedId) { await openLatest(); return; }
+      following = true;
+      $('conversation').scrollTop = $('conversation').scrollHeight;
     }
+    await refresh();
   } catch (error) { fail(error); } finally { sending = false; updateSend(); }
+}
+$('composer').onsubmit = async event => {
+  event.preventDefault();
+  const text = $('message').value.trim();
+  if (!text || composing) return;
+  await sendChat(binding.request(text, draft));
 };
 $('logout').onclick = async () => {
   closePanels();

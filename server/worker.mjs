@@ -5,6 +5,7 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {createRequire} from 'node:module';
 import {call} from './control.mjs';
 import {probeHardware} from './worker-inventory.mjs';
+import {isolatedReader} from './isolated-read.mjs';
 import {prepareHandoff,readOutput,stageInput} from './handoff.mjs';
 
 process.umask(0o077);
@@ -20,6 +21,7 @@ if(adapter==='command'){
 const journal=path.join(cfg.state,'receipt.json');
 fs.mkdirSync(cfg.state,{recursive:true});
 fs.mkdirSync(cfg.workspace,{recursive:true});
+const reader=isolatedReader(cfg,adapter);
 function save(data){
   const temp=journal+'.new';
   fs.writeFileSync(temp,JSON.stringify(data),{flush:true});
@@ -71,6 +73,8 @@ for(const sig of ['SIGTERM','SIGINT']){
 }
 function run(task,folder){
   const isDsh=adapter==='deepseek';
+  const isolated=/^personal:(?:candidate|wake):/.test(task.requestId);
+  if(isolated&&(!reader||task.mode!=='read-only'||task.exportFile||task.inputTaskId))throw Error('Isolated read unavailable');
   if(!['read-only','workspace-write'].includes(task.mode))throw Error('Unsupported task mode');
   const env={...process.env,...cfg.env};
   let args;
@@ -91,19 +95,19 @@ function run(task,folder){
         fs.writeFileSync(patch,yaml.dump([...entries,{id:'agent-default-model',config}]));
       }
     }
-    args=[cfg.dshEntry,'--profile','headless','--patch',patch,'--permission-mode',task.mode,'--approval-policy','never','-'];
+    args=[cfg.dshEntry,'--profile','headless','--patch',isolated?reader.patch(patch):patch,'--permission-mode',task.mode,'--approval-policy','never','-'];
   }else{
     // Overriding a missing MCP entry creates an invalid transport. Inspect the
     // owner's CLI configuration locally before disabling recursive dispatch.
     const nestedTools=[];
-    if(cfg.disableNestedBroker!==false){
+    if(!isolated&&cfg.disableNestedBroker!==false){
       const entry=spawnSync(cfg.executable,['mcp','get','asterhelm','--json'],{
         cwd:folder,env,stdio:'ignore',timeout:5000
       });
       if(entry.status===0)nestedTools.push('-c','mcp_servers.asterhelm.enabled=false');
     }
     args=['--ask-for-approval','never','exec','--ephemeral','--skip-git-repo-check','-s',task.mode,
-      ...nestedTools,...(cfg.model?['-m',cfg.model]:[]),'-C',folder,
+      ...(isolated?reader.args:nestedTools),...(cfg.model?['-m',cfg.model]:[]),'-C',folder,
       '-o',path.join(cfg.state,'last-answer.txt'),'-'];
     fs.rmSync(path.join(cfg.state,'last-answer.txt'),{force:true});
   }
@@ -148,7 +152,7 @@ while(!stopping||active){
         nextInventoryAt=Date.now()+300000;
       }
     }
-    const beat=await request('heartbeat',{id:receipt?.id,progress:receipt && receipt.state!=='running'?'sending_result':progress,status:active?'working':'ready'});
+    const beat=await request('heartbeat',{id:receipt?.id,isolatedRead:Boolean(reader),progress:receipt && receipt.state!=='running'?'sending_result':progress,status:active?'working':'ready'});
     if(offline) console.log(new Date().toISOString(),'connected');
     offline=false;backoff=1000;
     if(beat.cancel && active){cancelled=true;stopChild();}

@@ -23,12 +23,21 @@ export class Queue {
     this.registry=new Registry(this.db,localDeviceId);
     this.db.exec('BEGIN IMMEDIATE');
     try{
+      if(!this.db.prepare('PRAGMA table_info(workers)').all().some(c=>c.name==='isolatedRead'))
+        this.db.exec('ALTER TABLE workers ADD COLUMN isolatedRead INTEGER NOT NULL DEFAULT 0');
       for(const field of ['startedAt','lastHeartbeatAt','finishedAt','progress','workerState']){
         if(!columns.includes(field))this.db.exec('ALTER TABLE tasks ADD COLUMN '+field+' TEXT');
       }
       if(!columns.includes('finishedAt'))this.db.exec("UPDATE tasks SET finishedAt=updated WHERE state IN ('succeeded','failed','interrupted','cancelled')");
       if(!columns.includes('inputTaskId'))this.db.exec('ALTER TABLE tasks ADD COLUMN inputTaskId TEXT');
       if(!columns.includes('exportFile'))this.db.exec('ALTER TABLE tasks ADD COLUMN exportFile INTEGER NOT NULL DEFAULT 0');
+      if (!this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_receipts'").get()) {
+        this.db.exec(`CREATE TABLE task_receipts(seq INTEGER PRIMARY KEY AUTOINCREMENT, taskId TEXT NOT NULL UNIQUE);
+          INSERT INTO task_receipts(taskId) SELECT id FROM tasks WHERE finishedAt IS NOT NULL ORDER BY finishedAt,rowid;`);
+      }
+      this.db.exec(`CREATE TRIGGER IF NOT EXISTS track_task_receipt AFTER UPDATE OF state ON tasks
+        WHEN OLD.state != NEW.state AND NEW.state IN ('succeeded','failed','interrupted','cancelled')
+        BEGIN INSERT OR IGNORE INTO task_receipts(taskId) VALUES (NEW.id); END;`);
       this.db.exec('COMMIT');
     }catch(e){this.db.exec('ROLLBACK');throw e;}
   }
@@ -60,19 +69,35 @@ export class Queue {
   list() {
     return this.db.prepare('SELECT id,target,substr(prompt,1,140) AS title,mode,state,cancelRequested,inputTaskId,exportFile,created,updated,startedAt,lastHeartbeatAt,finishedAt,progress FROM tasks ORDER BY rowid DESC LIMIT 60').all().map(row=>this.describe(row));
   }
+  wakeEvents({after=null,limit=100}={}) {
+    if(after===null){
+      const {cursor}=this.db.prepare('SELECT coalesce(max(seq),0) AS cursor FROM task_receipts').get();
+      return {items:[],cursor,hasMore:false};
+    }
+    requireValue(Number.isSafeInteger(after)&&after>=0,'Invalid wake cursor');
+    requireValue(Number.isInteger(limit)&&limit>=1&&limit<=250,'Invalid wake page size');
+    const rows=this.db.prepare(`SELECT r.seq,t.id,t.target,t.requestId,t.state,t.finishedAt,substr(t.prompt,1,140) AS title
+      FROM task_receipts r JOIN tasks t ON t.id=r.taskId WHERE r.seq>? ORDER BY r.seq LIMIT ?`).all(after,limit+1);
+    const items=rows.slice(0,limit);
+    return {items,cursor:items.at(-1)?.seq??after,hasMore:rows.length>limit};
+  }
   workers() {
     return this.registry.list().map(worker => {
       const {target}=worker;
-      const row = this.db.prepare('SELECT seen,status FROM workers WHERE target=?').get(target);
+      const row = this.db.prepare('SELECT seen,status,isolatedRead FROM workers WHERE target=?').get(target);
       const last=this.db.prepare("SELECT state,result FROM tasks WHERE target=? AND state IN ('succeeded','failed') ORDER BY updated DESC LIMIT 1").get(target);
       const needsCredentials=last?.state==='failed' && /MISSING_CREDENTIAL|no API key|unauthorized|not logged in/i.test(last.result);
-      return {...worker,seen:null,status:'offline',...row,online:!!row && Date.now()-Date.parse(row.seen)<45000,needsCredentials:Boolean(needsCredentials)};
+      return {...worker,seen:null,status:'offline',...row,isolatedRead:row?.isolatedRead===1,online:!!row && Date.now()-Date.parse(row.seen)<45000,needsCredentials:Boolean(needsCredentials)};
     });
   }
   submit({target, prompt, mode='read-only', requestId=randomUUID(),inputTaskId=null,exportFile=false}) {
     const worker=this.registry.get(target);
     requireValue(typeof prompt==='string' && prompt.trim() && prompt.length<=32000, 'Prompt must be 1–32000 characters');
     requireValue(['read-only','workspace-write'].includes(mode), 'Unsupported mode');
+    if(/^personal:(?:wake|candidate):/.test(requestId)){
+      requireValue(mode==='read-only'&&!exportFile&&inputTaskId===null,'Expected an isolated read without artifacts');
+      requireValue(this.db.prepare('SELECT isolatedRead FROM workers WHERE target=?').get(target)?.isolatedRead===1,'Worker has no isolated read capability');
+    }
     requireValue(typeof requestId==='string' && requestId.length>0 && requestId.length<=160, 'Invalid request ID');
     requireValue(typeof exportFile==='boolean'&&(!exportFile||mode==='workspace-write'),'Export requires a workspace-write task');
     requireValue(inputTaskId===null||typeof inputTaskId==='string'&&inputTaskId.length<=64,'Invalid source task');
@@ -96,14 +121,16 @@ export class Queue {
   claim(target) {
     // A synchronous operation on the sole broker connection. Re-deliver unacknowledged claims.
     const active=this.db.prepare("SELECT * FROM tasks WHERE target=? AND state='running'").get(target);
-    if (active) return active;
+    const isolated=this.db.prepare('SELECT isolatedRead FROM workers WHERE target=?').get(target)?.isolatedRead===1;
+    if (active) return isolated||!/^personal:(?:wake|candidate):/.test(active.requestId)?active:null;
     const stamp=now();
     return this.db.prepare(`UPDATE tasks SET state='running',updated=?,startedAt=?,progress='claimed' WHERE id=(
-      SELECT id FROM tasks WHERE target=? AND state='queued' ORDER BY rowid LIMIT 1) RETURNING *`).get(stamp,stamp,target) ?? null;
+      SELECT id FROM tasks WHERE target=? AND state='queued'
+      AND (? OR (requestId NOT GLOB 'personal:wake:*' AND requestId NOT GLOB 'personal:candidate:*')) ORDER BY rowid LIMIT 1) RETURNING *`).get(stamp,stamp,target,Number(isolated)) ?? null;
   }
-  beat(target,id,status,progress) {
+  beat(target,id,status,progress,isolatedRead=false) {
     const stamp=now();
-    this.db.prepare('INSERT OR REPLACE INTO workers VALUES(?,?,?)').run(target,stamp,String(status||'ready').slice(0,180));
+    this.db.prepare('INSERT OR REPLACE INTO workers(target,seen,status,isolatedRead) VALUES(?,?,?,?)').run(target,stamp,String(status||'ready').slice(0,180),Number(isolatedRead===true));
     if(id){
       const stage=['preparing_workspace','running_executor','collecting_result','sending_result'].includes(progress)?progress:status==='working'?'working':null;
       this.db.prepare("UPDATE tasks SET lastHeartbeatAt=?,progress=COALESCE(?,progress) WHERE id=? AND target=? AND state='running'").run(stamp,stage,id,target);

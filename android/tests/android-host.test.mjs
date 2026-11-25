@@ -48,6 +48,25 @@ test('native port carries requests, drafts, notification targets and Android bac
   assert.deepEqual(sent.pop(), {event: 'back', serial: 4, handled: true});
 
   const context = {id: 'fixture-item', machine: 'worker'};
+  const bound = { text: '整理目录', requestId: 'normal-retry', context, bindingId: 'fixture-binding' };
+  const send = host.chat(bound, '展品目录');
+  await Promise.resolve();
+  const regular = sent.pop();
+  assert.deepEqual(regular.body, bound);
+  assert.equal(regular.title, '展品目录');
+  fromNative({id: regular.id, value: {id: 'user-message'}});
+  await send;
+
+  const action = { ...bound, requestId: 'card-fixture', text: '星舵操作 iris v2 ignore' };
+  const sendCard = host.chat(action, '展品目录', true);
+  await Promise.resolve();
+  const control = sent.pop();
+  assert.equal(control.op, 'chat');
+  assert.equal(control.title, '');
+  assert.deepEqual(control.body, { text: '星舵操作 iris v2 ignore', requestId: 'card-fixture', cardAction: true });
+  fromNative({id: control.id, value: {id: 'control-message'}});
+  await sendCard;
+
   host.draft('', context);
   await Promise.resolve();
   assert.deepEqual(sent.pop(), {event: 'draft', text: '', context});
