@@ -1,5 +1,5 @@
 import {FollowGoals} from './follow-goals.mjs';
-import {followIntent,resolveGoalChoice} from './follow-chat.mjs';
+import {followIntent,resolveGoalChoice,groundedFollow} from './follow-chat.mjs';
 import {agentActivity} from './agent-evidence.mjs';
 import {WorkReadTickets} from './work-read-tickets.mjs';
 import {desktopBackfill,desktopHasBackfill} from './desktop-backfill.mjs';
@@ -90,6 +90,15 @@ export class PersonalAgent{
     ]);
     this.goals.observe({rows:merge([...index,...extra.flat()]),workers,tasks:this.evidenceTasks(this.store.visibleTasks(tasks)),coverage,now});
   }
+  enrollGoal(turn,spec){
+    const card=this.goals.register(turn,spec);
+    if(card.messageId!==turn.id){
+      const state=card.status==='enabled'?'已开启提醒':'仅预览';
+      return '「'+card.title+'」已在原目标卡持续跟进（'+state+'）。';
+    }
+    const scope=spec.scopes?.length?'所选会话':'各设备已同步、与目标匹配的记录';
+    return '已关注「'+card.title+'」。我会从'+scope+'更新这条目标消息上的预览，开启推送由你确认。';
+  }
   async receiveGoal(input,intent){
     const selected=input.context?await this.exactSession(input.context):null;
     if(input.context&&!selected?.target)throw Error('当前索引里找不到已注册的所选会话');
@@ -99,13 +108,17 @@ export class PersonalAgent{
     },{linkWork:false});
     if(intent.kind==='clarify')return respond(()=>intent.message);
     if(intent.kind==='hold')return respond(()=>'收到，这次没有开启目标推送。');
+    if(intent.kind==='reference'){
+      if(selected){
+        const spec={title:selected.title,terms:[selected.title],scopes:[{machine:selected.machine,id:selected.id,target:selected.target}]};
+        const result=respond(turn=>this.enrollGoal(turn,spec));await this.refreshGoals();return result;
+      }
+      if(this.planner?.offline)return respond(()=>'想跟进刚才提到的哪项工作？告诉我名称，就能从原聊天开始预览。');
+      return this.store.receive(input,null,null,{linkWork:false});
+    }
     if(intent.kind==='register'){
       if(selected)intent.spec.scopes=[{machine:selected.machine,id:selected.id,target:selected.target}];
-      const result=respond(turn=>{
-        const card=this.goals.register(turn,intent.spec);
-        const scope=selected?'所选会话':'各设备已同步、与目标匹配的记录';
-        return '已关注「'+card.title+'」。我会从'+scope+'更新这条目标消息上的预览，开启推送由你确认。';
-      });
+      const result=respond(turn=>this.enrollGoal(turn,intent.spec));
       await this.refreshGoals();
       return result;
     }
@@ -460,8 +473,23 @@ export class PersonalAgent{
     try{
       let plan=turn.plan?JSON.parse(turn.plan):null;
       if(!plan){
-        const snap=await this.snapshot(turn);
+        const reference=followIntent(turn.text)?.kind==='reference';
+        const snap=reference?{phase:'followGoal',currentUser:turn.text,history:this.store.previous(turn.seq,turn.id)}:await this.snapshot(turn);
         let proposed=await this.planner.plan(snap);
+        if(reference||proposed.actions?.some(a=>a?.type==='follow_goal')){
+          const spec=groundedFollow(turn.text,snap.history,proposed,{reference});
+          this.store.transact(()=>{
+            if(!spec||snap.work||snap.attachedSession){
+              this.store.finish(turn,'你指的是哪一项目标？告诉我刚才讨论的项目名称，我会在主聊天里跟进。');
+            }else{
+              const hadWakeError=reference&&/为什么|为何/u.test(turn.text)&&snap.history.some(m=>m.role==='assistant'&&m.text.includes('本条消息没有授权这项唤醒动作'));
+              const receipt=this.enrollGoal(turn,spec);
+              this.store.finish(turn,(hadWakeError?'之前把目标跟进误判成了唤醒规则。':'')+receipt);
+            }
+          });
+          if(spec)await this.refreshGoals();
+          return;
+        }
         const standing=needsStandingRule(turn.text);
         const registrationMissing=proposal=>standing&&!proposal.actions?.some(a=>a.type==='wake_rule');
         if(registrationMissing(proposed))

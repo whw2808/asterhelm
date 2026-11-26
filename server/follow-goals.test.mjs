@@ -166,3 +166,24 @@ test('an explicitly requested decision alert waits for the owner and never repla
   assert.match(f.notices()[0].text,/needs your decision on the cover stock/);
   assert.doesNotMatch(f.notices()[0].text,/Completed|We chose|weight|no longer/);
 });
+
+test('sibling goals need distinguishing evidence in the reported finding and can match grounded versioned aliases',t=>{
+  const f=setup(t);
+  const print=f.register({title:'纸本馆藏目录',terms:['纸本','馆藏','目录','Iris']}).card;
+  const audio=f.register({title:'有声馆藏目录',terms:['有声','馆藏','目录']}).card;
+  const a=session('desk','馆藏目录项目','有声馆藏目录已完成 90 段录制。纸本另行处理。',-4000);
+  const b=session('bench','馆藏目录项目','Iris3 已完成第一轮校对，共整理了 42 条。',-2000);
+  f.observe([a,b],1000);
+  assert.deepEqual(f.goals.get(print.id).findings.map(x=>x.sourceId),[b.id]);
+  assert.deepEqual(f.goals.get(audio.id).findings.map(x=>x.sourceId),[a.id]);
+});
+test('adding a sibling withdraws a misattributed live excerpt but retains delivery deduplication',t=>{
+  const f=setup(t),print=f.register({title:'Paper museum catalog'}).card;
+  const result=session('desk','Museum catalog','Spoken museum catalog passed all 20 recording checks.',-1000);
+  f.observe([result],1000);assert.equal(f.goals.get(print.id).findings.length,1);
+  const spoken=f.register({title:'Spoken museum catalog'}).card;
+  f.observe([result],2000);
+  assert.equal(f.goals.get(print.id).findings.length,0);assert.equal(f.goals.get(spoken.id).findings.length,1);
+  assert.equal(f.store.db.prepare('SELECT count(*) AS n FROM follow_goal_findings WHERE goalId=?').get(print.id).n,1);
+  assert.deepEqual(f.notices(),[]);
+});
