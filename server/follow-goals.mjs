@@ -50,7 +50,8 @@ function goalSpec(input,now){
       Date.parse(input.until)>now,'需要有效且未过期的目标截止时间。');
     until=new Date(input.until).toISOString();
   }
-  return {title,terms,signals,until,scopes,...(input.origin?{origin:sourceScope(input.origin)}:{})};
+  return {title,terms,signals,until,scopes,...(input.origin?{origin:sourceScope(input.origin)}:{}),
+    ...(input.subjectSource?{subjectSource:sourceScope(input.subjectSource)}:{})};
 }
 function signalMatches(signal,summary){
   const term=signal.toLowerCase(),text=summary.toLowerCase();
@@ -107,15 +108,27 @@ export class FollowGoals{
       return this.get(id);
     });
   }
+  refine(turn,known,input){
+    const user=signedUser(this.store,turn);
+    const row=this.db.prepare('SELECT spec,status,version FROM follow_goals WHERE id=?').get(known.id);
+    requireThat(user.state==='new'&&row?.version===known.version&&['enabled','preview'].includes(row.status),'目标状态已变化。');
+    if(row.status==='preview'){
+      const prior=JSON.parse(row.spec);
+      prior.terms=[...new Set([...prior.terms,...input.terms])].slice(0,32);
+      if(input.subjectSource&&!prior.subjectSource)prior.subjectSource=sourceScope(input.subjectSource);
+      this.db.prepare('UPDATE follow_goals SET spec=? WHERE id=?').run(JSON.stringify(prior),known.id);
+    }
+    return this.get(known.id);
+  }
   expire(now){
     this.db.prepare("UPDATE follow_goals SET status='stopped',enabledAt=NULL,version=version+1 WHERE status!='stopped' AND untilAt<=?").run(now);
   }
   hasActive(){
     return Boolean(this.db.prepare('SELECT 1 FROM follow_goals WHERE '+activeSelection+' LIMIT 1').get(Date.now()));
   }
-  activeSpecs(){
-    return this.db.prepare('SELECT spec FROM follow_goals WHERE '+activeSelection+' ORDER BY rowid').all(Date.now())
-      .map(row=>{const {title,scopes}=JSON.parse(row.spec);return {title,scopes};});
+  activeSpecs(id=null){
+    return this.db.prepare('SELECT spec FROM follow_goals WHERE '+activeSelection+' AND (? IS NULL OR id=?) ORDER BY rowid').all(Date.now(),id,id)
+      .map(row=>{const {title,scopes,subjectSource}=JSON.parse(row.spec);return {title,scopes,...(subjectSource?{subjectSource}:{})};});
   }
   get(id){
     this.expire(Date.now());
@@ -163,12 +176,12 @@ export class FollowGoals{
       return this.get(id);
     });
   }
-  observe({rows=[],workers=[],tasks=[],coverage=[],now=Date.now()}={}){
+  observe({rows=[],workers=[],tasks=[],coverage=[],now=Date.now(),onlyId=null}={}){
     now=new Date(now).getTime();
     if(!Number.isFinite(now))return;
     return inTransaction(this.store,()=>{
       this.expire(now);
-      const active=this.db.prepare("SELECT * FROM follow_goals WHERE status IN ('preview','enabled') AND (observedAt IS NULL OR observedAt<=?)").all(now);
+      const active=this.db.prepare("SELECT * FROM follow_goals WHERE status IN ('preview','enabled') AND (observedAt IS NULL OR observedAt<=?) AND (? IS NULL OR id=?)").all(now,onlyId,onlyId);
       // A remembered sibling still identifies a different topic when its own follow-up is paused.
       const otherGoals=active.length?this.db.prepare('SELECT spec FROM follow_goals').all().map(r=>JSON.parse(r.spec)):[];
       for(const row of active){

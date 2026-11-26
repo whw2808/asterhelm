@@ -200,6 +200,12 @@ function anchors(terms,text){
   const hits=terms.filter(entry=>entry.match.test(normalized));
   return hits.filter(entry=>!hits.some(other=>other.term.length>entry.term.length&&entry.match.test(other.term)));
 }
+// A short clarification can distinguish sibling projects. Only keep words
+// in the user's turn corroborated by the registered source's own records.
+export function sourceTerms(text,row){
+  const body=[row?.title,row?.summary,...list(row?.evidence).map(e=>e.text)].filter(Boolean).join(' ');
+  return anchors(termsFor({title:text}),body).slice(0,6).map(entry=>entry.term);
+}
 function identity(worker){
   return {deviceId:worker.deviceId,deviceName:worker.deviceName||worker.deviceId,target:worker.target,agentName:worker.agentName||worker.target};
 }
