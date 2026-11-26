@@ -1,3 +1,4 @@
+import {workspaceDecision} from './dispatch-authorization.mjs';
 import {FollowRouting,subjectConflict} from './follow-routing.mjs';
 import {FollowGoals} from './follow-goals.mjs';
 import {followIntent,resolveGoalChoice} from './follow-chat.mjs';
@@ -27,7 +28,6 @@ import {home,call} from './control.mjs';
 const terminal=new Set(['succeeded','failed','interrupted','cancelled']);
 
 const noChanges=/只读|只解释|只回答|只告诉|仅解释|先别做|不要(?:执行|修改|写入|改动|派单|运行|操作)|无需(?:操作|修改)|do not (?:edit|change|write|run|dispatch)|read[ -]only|explain only/i;
-const explicitWrite=/生成|写入|创建|修改|改动|实现|制作|保存文件|写.{0,4}文件|make|creat|edit|writ|save|implement/i;
 const clean=(s,n)=>typeof s==='string'?s.trim().slice(0,n):'';
 function needsStandingRule(text){
   return /每次|每当|每个?工作日|每天|每周|whenever|every (?:time|weekday|day|week)/iu.test(text)&&
@@ -343,8 +343,9 @@ export class PersonalAgent{
           const write=a.type==='dispatch'&&a.write===true;
           const mode=write?'workspace-write':'read-only';
           assert(worker.capabilities?.includes(mode),'执行端没有所需能力');
-          assert(!forbidDelegation.test(turn.text),'当前消息要求直接解释或暂缓执行');
-          assert(!write||(!noChanges.test(turn.text)&&explicitWrite.test(turn.text)),'本条消息没有允许创建或修改文件');
+          // Write dispatches receive a separate check of the complete request
+          // and assignment. A read-only constraint can apply to the originals.
+          if(!write)assert(!forbidDelegation.test(turn.text),'当前消息要求直接解释或暂缓执行');
           if(attached&&attached.machine!==worker.deviceId){
             const assigned=revision&&snap.activeWork.find(order=>order.id===revision.id)?.tasks.some(s=>s.target===worker.target);
             assert(assigned||mentions(turn.text,worker),'所选会话与执行设备不一致');
@@ -558,6 +559,8 @@ export class PersonalAgent{
             plan=checked(proposed);
           }
         }catch(e){this.store.transact(()=>this.store.finish(turn,'我还没有执行这一步。'+e.message+'。请补充具体要求。'));return;}
+        const denied=await workspaceDecision(this.planner,turn,snap,plan);
+        if(denied){this.store.transact(()=>this.store.finish(turn,denied));return;}
         this.store.transact(()=>{
           if(isMain)this.follow.clear('main');
           this.store.savePlan(turn,plan);
