@@ -29,23 +29,7 @@ function topicSpec(title,extra=[]){
   const words=Array.from(segments.segment(title.toLowerCase())).filter(s=>s.isWordLike&&s.segment.length>1&&!filler.has(s.segment));
   return {title,terms:[...new Set([title,...words.map(s=>s.segment),...extra])],until:null};
 }
-// History can name a referent. It cannot grant notifications, execution, extra sources or a time limit.
-export function groundedFollow(text,history,proposal,{reference=false}={}){
-  if(!observationRequest(text)||proposal?.actions?.length!==1)return null;
-  const a=proposal.actions[0];
-  if(a?.type!=='follow_goal'||typeof a.evidence!=='string'||a.evidence.length<2||
-    !text.includes(a.evidence)||!firstClause(text).includes(firstClause(a.evidence))||!followVerb.test(firstClause(a.evidence)))return null;
-  if(Object.keys(a).some(key=>!['type','evidence','title','terms'].includes(key)))return null;
-  const title=typeof a.title==='string'?tidy(a.title):'';
-  if(title.length<2||title.length>120||referent.test(title)||/[\n。；]/u.test(title))return null;
-  const last=history.filter(m=>m.role==='user'&&!m.text.startsWith('星舵操作 ')&&followIntent(m.text)?.kind!=='reference').at(-1);
-  const source=(reference?last?.text:directClause(text))?.toLowerCase()??'';
-  if(!source.includes(title.toLowerCase()))return null;
-  const terms=a.terms??[];
-  if(!Array.isArray(terms)||terms.length>6||terms.some(t=>typeof t!=='string'||t.trim().length<2||t.length>80||!source.includes(t.toLowerCase())))return null;
-  return topicSpec(title,terms.map(t=>t.trim()));
-}
-export function followIntent(text,{now=Date.now(),goalIds=[],titles=[]}={}){
+export function followIntent(text,{now=Date.now(),goalIds=[],titles=[],offlineEnrollment=true}={}){
   if(typeof text!=='string')return null;
   const words=text.trim().replace(/[。.!！?？]+$/u,'');
   const card=nativeCard.exec(words);
@@ -65,6 +49,8 @@ export function followIntent(text,{now=Date.now(),goalIds=[],titles=[]}={}){
   }
   if(/^(?:(?:帮我|给我)?(?:看看?|查看|列出|显示|预览))?(?:(?:目前|现在|当前|我的|这个|这些|所有|关注的)\s*)*目标(?:关注)?(?:预览|进展|进度|状态|有什么进展|会提醒我什么|有什么更新|到哪一步了|列表|的进展)(?:如何|怎么样|怎样|到哪了|有哪些|如何了|了吗|了)?$/u.test(words))return {kind:'query'};
   if(/^(?:看看|查看|显示|列出)(?:各个|每个|所有|各台设备的)\s*(?:agents?|智能体)\s*(?:在做什么|做到哪一步|的进度|的进展|的依据)(?:[，,、 ]*(?:依据是什么|依据|进度))?$/iu.test(words))return {kind:'activity'};
+  // Legacy local commands remain available when no language model is configured.
+  if(!offlineEnrollment)return null;
   if(/^(?:只关注|仅关注|只跟进|仅跟进)/u.test(words)&&/所选|选的|指定的|这两|这几/u.test(words))
     return {kind:'clarify',message:'请在看板上选定要关注的具体会话，再从这场对话告诉我目标。'};
   let body=words.replace(/^(?:请|麻烦)?(?:星舵[，, ]*)?/u,'');

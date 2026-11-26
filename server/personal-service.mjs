@@ -1,5 +1,6 @@
+import {FollowRouting,subjectConflict} from './follow-routing.mjs';
 import {FollowGoals} from './follow-goals.mjs';
-import {followIntent,resolveGoalChoice,groundedFollow} from './follow-chat.mjs';
+import {followIntent,resolveGoalChoice} from './follow-chat.mjs';
 import {agentActivity} from './agent-evidence.mjs';
 import {WorkReadTickets} from './work-read-tickets.mjs';
 import {desktopBackfill,desktopHasBackfill} from './desktop-backfill.mjs';
@@ -53,6 +54,7 @@ export class PersonalAgent{
     this.store=store;this.flows=new Flows(store);this.planner=this.usage.wrap(planner);this.contexts=contexts;this.broker=broker;
     this.candidates=new ProactiveCandidates(store);this.rules=new WakeRules(store);this.workWake=new WorkWake(store);
     this.goals=new FollowGoals(store);
+    this.follow=new FollowRouting(store,this.goals);
     this.observedRows=[];this.rowsAvailable=false;
     this.processing=false;this.checking=false;this.lastObservation=0;
   }
@@ -76,19 +78,19 @@ export class PersonalAgent{
       return step&&step.target===task.target?{...task,workStep:{kind:step.kind,title:step.title}}:task;
     });
   }
-  async refreshGoals(rows,catalog,now=Date.now()){
+  async refreshGoals(rows,catalog,now=Date.now(),onlyId=null){
     if(!this.goals.hasActive())return;
     const [index,workers,tasks,coverage]=await Promise.all([
       rows??optional(()=>this.contextRows('',500),null),catalog??optional(()=>this.broker('/workers'),null),
       optional(()=>this.broker('/list'),[]),optional(()=>this.contexts.contextCoverage(home),[])]);
     if(!Array.isArray(index)||!Array.isArray(workers))return;
     const bySource=new Set(index.map(row=>row.machine+'|'+row.id));
-    const specs=this.goals.activeSpecs();
+    const specs=this.goals.activeSpecs(onlyId);
     const extra=await Promise.all([
-      ...specs.flatMap(s=>s.scopes).filter(p=>!bySource.has(p.machine+'|'+p.id)).map(p=>optional(()=>this.exactSession(p),null)),
+      ...specs.flatMap(s=>s.subjectSource?[...s.scopes,s.subjectSource]:s.scopes).filter(p=>!bySource.has(p.machine+'|'+p.id)).map(p=>optional(()=>this.exactSession(p),null)),
       ...(index.length>=500?specs.filter(s=>!s.scopes.length).map(s=>optional(()=>this.contextRows(s.title,80),[])):[])
     ]);
-    this.goals.observe({rows:merge([...index,...extra.flat()]),workers,tasks:this.evidenceTasks(this.store.visibleTasks(tasks)),coverage,now});
+    this.goals.observe({rows:merge([...index,...extra.flat()]),workers,tasks:this.evidenceTasks(this.store.visibleTasks(tasks)),coverage,now,onlyId});
   }
   enrollGoal(turn,spec){
     const card=this.goals.register(turn,spec);
@@ -154,7 +156,7 @@ export class PersonalAgent{
   async receive(input){
     const command=typeof input.text==='string'?/^星舵操作 ([\w:-]+) /u.exec(input.text.trim()):null;
     const titles=typeof input.text==='string'&&/进度|进展|推送|提醒我什么|做到哪一步|目标预览/u.test(input.text)?this.goals.activeSpecs().map(s=>s.title):[];
-    const intent=followIntent(input.text,{goalIds:command&&this.goals.get(command[1])?[command[1]]:[],titles});
+    const intent=followIntent(input.text,{goalIds:command&&this.goals.get(command[1])?[command[1]]:[],titles,offlineEnrollment:!!this.planner?.offline});
     if(intent)return this.receiveGoal(input,intent);
     if(isUsageQuestion(input.text)){
       // Account-wide totals belong to the paired user's chat. This query also works offline.
@@ -191,6 +193,25 @@ export class PersonalAgent{
       this.store.finish(turn,'已关联这段桌面会话。工作更新会送到原窗口，等你说“继续”再执行。');
       return {id:turn.id,workId:this.store.continuity.workForTurn(turn.id)};
     });
+    if(row&&!input.workId){
+      // A board selection normally binds its desktop thread on receipt. Resolve
+      // observation-only requests before that binding can create a work identity.
+      if(this.store.db.prepare('SELECT 1 FROM turns WHERE requestId=?').get(input.requestId))
+        return this.store.receive(input,row);
+      const scope=JSON.stringify([row.machine,row.id]);
+      const snap={phase:'selectedFollow',currentUser:input.text,sessions:[compact(row)],follow:this.follow.context(scope)};
+      const proposal=await this.followProposal(snap);
+      if(!this.leftFollow(proposal,input.text)){
+        let outcome;
+        const result=this.store.receive(input,row,turn=>{outcome=this.follow.handle(turn,proposal,snap,{scope,selected:row});},{linkWork:false});
+        if(outcome?.previewId)await this.refreshGoals(null,null,Date.now(),outcome.previewId);
+        return result;
+      }
+      return this.store.receive(input,row,turn=>{
+        this.follow.clear(scope);
+        return {id:turn.id,workId:this.store.continuity.workForTurn(turn.id)};
+      });
+    }
     return this.store.receive(input,row);
   }
   async exactSession({machine,id}){
@@ -465,6 +486,37 @@ export class PersonalAgent{
     this.delivering=true;
     try{await deliverWork(this);}finally{this.delivering=false;}
   }
+  async followSnapshot(snap){
+    snap.follow=this.follow.context();
+    const subject=snap.follow.focus?.subjectSource;
+    if(subject&&!snap.sessions.some(s=>s.machine===subject.machine&&s.id===subject.id&&s.visibility!=='metadata-only')){
+      const row=await optional(()=>this.exactSession(subject),null);
+      if(row?.target===subject.target)snap.sessions=merge([compact(row),...snap.sessions]);
+    }
+    if(snap.follow.pending){
+      const originalMatches=await optional(()=>this.contextRows(snap.follow.pending.request,8),[]);
+      snap.sessions=merge([...snap.sessions,...originalMatches.map(compact)]);
+      snap.phase='pendingFollow';
+    }
+    else if(snap.follow.focus)snap.phase='focusedFollow';
+    if(!snap.phase)return snap;
+    const {phase,currentUser,now,timeZone,sessions,history,follow}=snap;
+    return {phase,currentUser,now,timeZone,sessions,history,follow};
+  }
+  async followProposal(input){
+    const plan=await this.planner.plan(input);
+    if(subjectConflict(plan,input))
+      return this.planner.plan({...input,routingCorrection:'这项选择缺少同一项目的依据，或拟定的名称改变了原卡身份。重新从用户原话辨认具体项目。若是不同项目，独立建立预览，省略 goalId；若确有多个可能，返回 follow_goal.question。不能合并、扩展或改名已有目标。'});
+    if(!['pendingFollow','focusedFollow','selectedFollow'].includes(input.phase)||plan.actions?.length)return plan;
+    // A missing decision is a model format error, not a request to forget the
+    // open intent. One correction retains the same read-only capabilities.
+    return this.planner.plan({...input,routingCorrection:'请按当前 phase 在 actions 中填写一个决定。补充信息时使用原目标，改谈其他事情用 leave_follow。'});
+  }
+  leftFollow(plan,text){
+    const [action]=plan.actions??[];
+    return plan.actions?.length===1&&action?.type==='leave_follow'&&Object.keys(action).every(k=>['type','evidence'].includes(k))&&typeof action.evidence==='string'&&
+      action.evidence.trim().length>0&&text.includes(action.evidence);
+  }
   async step(){
     if(this.processing)return;
     const turn=this.store.pending();
@@ -473,21 +525,21 @@ export class PersonalAgent{
     try{
       let plan=turn.plan?JSON.parse(turn.plan):null;
       if(!plan){
-        const reference=followIntent(turn.text)?.kind==='reference';
-        const snap=reference?{phase:'followGoal',currentUser:turn.text,history:this.store.previous(turn.seq,turn.id)}:await this.snapshot(turn);
-        let proposed=await this.planner.plan(snap);
-        if(reference||proposed.actions?.some(a=>a?.type==='follow_goal')){
-          const spec=groundedFollow(turn.text,snap.history,proposed,{reference});
-          this.store.transact(()=>{
-            if(!spec||snap.work||snap.attachedSession){
-              this.store.finish(turn,'你指的是哪一项目标？告诉我刚才讨论的项目名称，我会在主聊天里跟进。');
-            }else{
-              const hadWakeError=reference&&/为什么|为何/u.test(turn.text)&&snap.history.some(m=>m.role==='assistant'&&m.text.includes('本条消息没有授权这项唤醒动作'));
-              const receipt=this.enrollGoal(turn,spec);
-              this.store.finish(turn,(hadWakeError?'之前把目标跟进误判成了唤醒规则。':'')+receipt);
-            }
-          });
-          if(spec)await this.refreshGoals();
+        const snap=await this.snapshot(turn);
+        const isMain=!snap.work&&!snap.attachedSession;
+        const input=isMain?await this.followSnapshot(snap):snap;
+        let proposed=await this.followProposal(input);
+        const leaving=snap.phase&&this.leftFollow(proposed,turn.text);
+        if(leaving){
+          // A topic change gets the normal planner with only this turn's grants.
+          // Clear the pending row only when the replacement plan is committed.
+          delete snap.phase;
+          snap.follow={...snap.follow,pending:null,focus:null};
+          proposed=await this.planner.plan(snap);
+        }
+        const outcome=isMain&&this.follow.handle(turn,proposed,snap);
+        if(outcome){
+          if(outcome.previewId)await this.refreshGoals(null,null,Date.now(),outcome.previewId);
           return;
         }
         const standing=needsStandingRule(turn.text);
@@ -506,7 +558,10 @@ export class PersonalAgent{
             plan=checked(proposed);
           }
         }catch(e){this.store.transact(()=>this.store.finish(turn,'我还没有执行这一步。'+e.message+'。请补充具体要求。'));return;}
-        this.store.savePlan(turn,plan);
+        this.store.transact(()=>{
+          if(isMain)this.follow.clear('main');
+          this.store.savePlan(turn,plan);
+        });
       }
       await this.apply(turn,plan);
     }catch(err){
