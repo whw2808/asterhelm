@@ -1,6 +1,6 @@
 {
   "name": "asterhelm",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "A self-hosted personal assistant that routes work across your devices and agents.",
   "private": true,
   "license": "MIT",
