@@ -1,3 +1,6 @@
+import {FollowGoals} from './follow-goals.mjs';
+import {followIntent,resolveGoalChoice} from './follow-chat.mjs';
+import {agentActivity} from './agent-evidence.mjs';
 import {WorkReadTickets} from './work-read-tickets.mjs';
 import {desktopBackfill,desktopHasBackfill} from './desktop-backfill.mjs';
 import http from 'node:http';
@@ -32,6 +35,11 @@ function needsStandingRule(text){
 const specific=(rows,id)=>rows.find(row=>row.id===id);
 const optional=async(fn,fallback)=>{try{return await fn();}catch{return fallback;}};
 function compact(row){return {machine:row.machine,target:row.target??null,id:row.id,title:clean(row.title,140),summary:clean(row.summary,720),cwd:clean(row.cwd,230),updatedAt:row.updatedAt,status:row.status,visibility:row.visibility,source:row.source,evidence:(row.evidence||[]).slice(-3).map(e=>({role:e.role,text:clean(e.text,460),at:e.at,turnId:e.turnId,itemId:e.itemId}))};}
+function describeFact(fact){
+  const date=Date.parse(fact.at);
+  const stamp=Number.isFinite(date)?new Date(date).toLocaleString('zh-CN',{hour12:false}):'时间未知';
+  return [fact.stageLabel,fact.summary,fact.sourceLabel,stamp,fact.freshness==='stale'?'较早记录':null].filter(Boolean).join(' · ');
+}
 function merge(rows){const list=new Map();for(const r of rows)if(r?.id&&!list.has(r.machine+'|'+r.id))list.set(r.machine+'|'+r.id,r);return [...list.values()];}
 function plausibleDate(value){
   if(value==null||value==='')return null;
@@ -44,11 +52,12 @@ export class PersonalAgent{
     this.usage=new TokenUsage(store.db);
     this.store=store;this.flows=new Flows(store);this.planner=this.usage.wrap(planner);this.contexts=contexts;this.broker=broker;
     this.candidates=new ProactiveCandidates(store);this.rules=new WakeRules(store);this.workWake=new WorkWake(store);
+    this.goals=new FollowGoals(store);
     this.observedRows=[];this.rowsAvailable=false;
     this.processing=false;this.checking=false;this.lastObservation=0;
   }
   async contextRows(query,limit=20){return await this.contexts.readContexts(home,{query,limit});}
-  proactiveCards(ids){return [...this.candidates.cards(ids),...this.rules.cards(ids)];}
+  proactiveCards(ids){return [...this.candidates.cards(ids),...this.rules.cards(ids),...this.goals.cards(ids)];}
   history(input){
     const result=this.store.history(input),messages=new Map(result.messages.map(m=>[m.id,m]));
     for(const card of this.proactiveCards([...messages.keys()])){
@@ -58,7 +67,82 @@ export class PersonalAgent{
     for(const row of result.messages)if(row.work)Object.assign(row.work,this.workWake.card(row.work.id));
     return result;
   }
+  evidenceTasks(visible){
+    const steps=this.store.db.prepare(`SELECT taskId,target,kind,title FROM work_steps
+      WHERE taskId IN (SELECT value FROM json_each(?))`).all(JSON.stringify(visible.map(task=>task.id)));
+    const byId=new Map(steps.map(step=>[step.taskId,step]));
+    return visible.map(task=>{
+      const step=byId.get(task.id);
+      return step&&step.target===task.target?{...task,workStep:{kind:step.kind,title:step.title}}:task;
+    });
+  }
+  async refreshGoals(rows,catalog,now=Date.now()){
+    if(!this.goals.hasActive())return;
+    const [index,workers,tasks,coverage]=await Promise.all([
+      rows??optional(()=>this.contextRows('',500),null),catalog??optional(()=>this.broker('/workers'),null),
+      optional(()=>this.broker('/list'),[]),optional(()=>this.contexts.contextCoverage(home),[])]);
+    if(!Array.isArray(index)||!Array.isArray(workers))return;
+    const bySource=new Set(index.map(row=>row.machine+'|'+row.id));
+    const specs=this.goals.activeSpecs();
+    const extra=await Promise.all([
+      ...specs.flatMap(s=>s.scopes).filter(p=>!bySource.has(p.machine+'|'+p.id)).map(p=>optional(()=>this.exactSession(p),null)),
+      ...(index.length>=500?specs.filter(s=>!s.scopes.length).map(s=>optional(()=>this.contextRows(s.title,80),[])):[])
+    ]);
+    this.goals.observe({rows:merge([...index,...extra.flat()]),workers,tasks:this.evidenceTasks(this.store.visibleTasks(tasks)),coverage,now});
+  }
+  async receiveGoal(input,intent){
+    const selected=input.context?await this.exactSession(input.context):null;
+    if(input.context&&!selected?.target)throw Error('当前索引里找不到已注册的所选会话');
+    const respond=(fn)=>this.store.receive(input,selected,turn=>{
+      this.store.finish(turn,fn(turn),false);
+      return {id:turn.id};
+    },{linkWork:false});
+    if(intent.kind==='clarify')return respond(()=>intent.message);
+    if(intent.kind==='hold')return respond(()=>'收到，这次没有开启目标推送。');
+    if(intent.kind==='register'){
+      if(selected)intent.spec.scopes=[{machine:selected.machine,id:selected.id,target:selected.target}];
+      const result=respond(turn=>{
+        const card=this.goals.register(turn,intent.spec);
+        const scope=selected?'所选会话':'各设备已同步、与目标匹配的记录';
+        return '已关注「'+card.title+'」。我会从'+scope+'更新这条目标消息上的预览，开启推送由你确认。';
+      });
+      await this.refreshGoals();
+      return result;
+    }
+    if(intent.kind==='decision'){
+      if(selected||input.workId)return respond(()=>'请回到主聊天的目标卡，选择要更新的目标。');
+      return respond(turn=>{
+        const choice=resolveGoalChoice(intent,intent.id?[]:this.goals.cards());
+        if(choice.error)return choice.error;
+        try{return this.goals.decide(turn,choice).detail;}
+        catch(err){return err.message;}
+      });
+    }
+    if(selected||input.workId)return respond(()=>'目标总览在主聊天里查看。当前会话的进展可从看板的 Agent 卡查看。');
+    if(intent.kind==='activity'){
+      const {machines}=await this.board({layout:'machines'});
+      const lines=machines.flatMap(m=>m.agents.map(a=>m.name+' / '+a.name+' · '+(a.activity?describeFact(a.activity):'暂无可归属的记录')));
+      return respond(()=>lines.join('\n')||'还没有已注册的 Agent。');
+    }
+    await this.refreshGoals();
+    return respond(()=>{
+      const cards=this.goals.cards().filter(c=>c.status!=='stopped'&&(!intent.title||c.title===intent.title));
+      if(!cards.length)return '当前没有关注中的目标。可以直接告诉我“帮我关注……”和目标名称。';
+      return cards.map(c=>{
+        const notices=c.findings.filter(f=>f.wouldNotify);
+        const latest=notices.length?notices:c.findings;
+        return ['「'+c.title+'」 · '+({preview:'仅预览',enabled:'推送已开启',paused:'跟进已暂停'}[c.status]??c.status),
+          ...(intent.recheck?['已按原始来源重新核对。查询任务的完成回执只证明查证结束。']:[]),
+          notices.length?'符合提醒条件的依据：':'当前没有符合提醒条件的新依据。',
+          ...latest.slice(0,3).map(f=>f.deviceName+' / '+f.agentName+' · '+describeFact(f))].join('\n');
+      }).join('\n\n');
+    });
+  }
   async receive(input){
+    const command=typeof input.text==='string'?/^星舵操作 ([\w:-]+) /u.exec(input.text.trim()):null;
+    const titles=typeof input.text==='string'&&/进度|进展|推送|提醒我什么|做到哪一步|目标预览/u.test(input.text)?this.goals.activeSpecs().map(s=>s.title):[];
+    const intent=followIntent(input.text,{goalIds:command&&this.goals.get(command[1])?[command[1]]:[],titles});
+    if(intent)return this.receiveGoal(input,intent);
     if(isUsageQuestion(input.text)){
       // Account-wide totals belong to the paired user's chat. This query also works offline.
       return this.store.receive({...input,context:null,workId:null},null,turn=>{
@@ -67,7 +151,7 @@ export class PersonalAgent{
       });
     }
     const inspect=typeof input.text==='string'&&/^(?:星舵操作|可以|同意|好|批准|立项|把这件事|开始这件工作|忽略|再查|再核对|暂停|恢复|取消|停止)/.test(input.text.trim());
-    const cards=inspect?this.proactiveCards():[];
+    const cards=inspect?[...this.candidates.cards(),...this.rules.cards()]:[];
     const recent=this.store.db.prepare('SELECT id FROM messages ORDER BY seq DESC LIMIT 1').get();
     const choice=typeof input.text==='string'?cardChoice(input.text,cards,recent?.id):null;
     if(choice){
@@ -105,7 +189,10 @@ export class PersonalAgent{
     const [workers,tasks,sessions,coverage]=await Promise.all([
       optional(()=>this.broker('/workers'),[]),optional(()=>this.broker('/list'),[]),
       this.contextRows('',500),this.contexts.contextCoverage(home)]);
-    const rows={workers,tasks:this.store.visibleTasks(tasks),sessions:sessions.map(({evidence,...s})=>s),coverage};
+    const visible=this.store.visibleTasks(tasks);
+    const evidence=this.evidenceTasks(visible);
+    const available=workers.map(worker=>({...worker,activity:agentActivity({worker,rows:sessions,tasks:evidence,coverage})}));
+    const rows={workers:available,tasks:visible,sessions:sessions.map(({evidence,...s})=>s),coverage};
     return {...(layout==='machines'?groupBoard(rows):rows),coverage,usage:this.usage.summary(),
       preferences:this.store.preferences(),commitments:this.store.openItems().concat(this.flows.listReviews()),watches:this.store.watchers().map(({id,text,machine,sessionId})=>({id,text,machine,sessionId}))};
   }
@@ -421,10 +508,12 @@ export class PersonalAgent{
         this.flows.processReview(this.planner,event=>this.snapshot({text:event.text,id:event.source,seq:Number.MAX_SAFE_INTEGER})).catch(()=>{}).finally(()=>{this.reviewing=false;});
       }
       if(Date.now()-this.lastObservation>=30000){
+        const observedAt=Date.now();
         const rows=await optional(()=>this.contextRows('',500),null);
-        this.lastObservation=Date.now();
+        this.lastObservation=observedAt;
         this.rowsAvailable=Array.isArray(rows);
         if(this.rowsAvailable){
+          if(Array.isArray(catalog))await this.refreshGoals(rows,catalog,observedAt);
           const known=new Map(rows.map(row=>[row.machine+'|'+row.id,row]));
           const participants=this.store.continuity.participants();
           const watched=this.store.watchers().map(w=>({machine:w.machine,id:w.sessionId}));

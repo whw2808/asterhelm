@@ -49,11 +49,13 @@ export class ChatBinding {
 }
 
 const decisionLabels = { approve: '同意立项', ignore: '忽略此项', recheck: '再查一次，暂不立项',
-  pause: '暂停', resume: '恢复', cancel: '取消' };
+  pause: '暂停', resume: '恢复', cancel: '取消', enable: '开启提醒', preview: '切回预览', stop: '停止跟进' };
 const cardId = /^[A-Za-z0-9:_-]{1,160}$/;
-const controlText = /^星舵操作 ([A-Za-z0-9:_-]{1,160}) v([1-9]\d{0,8}) (approve|ignore|recheck|pause|resume|cancel)$/;
+const controlText = /^星舵操作 ([A-Za-z0-9:_-]{1,160}) v([1-9]\d{0,8}) (approve|ignore|recheck|pause|resume|cancel|enable|preview|stop)$/;
 
 export function cardCommand(card, decision) {
+  if (['enable', 'preview', 'stop'].includes(decision) && card.kind !== 'goal') return '';
+  if (decision === 'enable' && !['preview', 'paused'].includes(card.status)) return '';
   if (typeof card.id !== 'string' || !cardId.test(card.id) || !Number.isSafeInteger(card.version) || card.version < 1 || card.version > 999999999 ||
       !Object.hasOwn(decisionLabels, decision) || !card.actions?.some(action => action.decision === decision)) return '';
   return '星舵操作 ' + card.id + ' v' + card.version + ' ' + decision;
@@ -115,7 +117,7 @@ export function mergeWorkHistory(previous, page, prepend = false) {
 }
 
 export const liveWork = work => work?.state === 'working' || work?.state === 'synthesizing';
-const settledCards = new Set(['cancelled', 'completed', 'ignored', 'approved']);
+const settledCards = new Set(['cancelled', 'completed', 'ignored', 'approved', 'stopped']);
 const unsettledSteps = new Set(['queued', 'running', 'offline']);
 
 export async function refreshOlderWork(page, transcript, fetchAround, current = () => true) {

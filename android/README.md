@@ -31,6 +31,8 @@ On the board, open a desktop session and choose **接着聊**. Messages keep usi
 
 Discovery and standing-rule cards update on the original chat message. A discovery shows its evidence and any read-only check. Tap **同意立项** to start the proposed work, or use the card to ignore it or request another check. A rule shows its next check or awaited event, recent activity and available controls. Card actions retain their request identity across retries and leave the composer draft and selected desktop session in place.
 
+Tell Asterhelm which goal to follow in chat. The **目标跟进** card on that message starts in preview mode. Read the sample reminder and expand **依据** to see the device, agent, source, time and reason a finding qualifies. Choose **开启提醒** to receive future matching updates. On the board, open an agent to inspect its latest work evidence and timestamp. When the only record is a heartbeat, the board shows the heartbeat time and indicates that a work step has yet to be verified.
+
 Install the updated APK over the previous version with the same signing identity and server origin to keep the existing pairing. If a message was pending in the previous version, selecting its original session restores the text for retry.
 
 The interface loads from assets bundled in the APK. Only native HTTPS requests contact the configured Asterhelm server. When enabled, reminders use a foreground service with a visible notification and a periodic catch-up job.

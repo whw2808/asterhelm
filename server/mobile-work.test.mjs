@@ -201,3 +201,38 @@ test('a partial multi-step receipt retains its measured input, output and total 
   assert.equal(usageTokenCount(bucket, 'inputTokens'), '≥30');
   assert.equal(usageTokenCount(bucket, 'outputTokens'), '≥7');
 });
+
+test('only a preview or paused goal offering enable can send an idempotent notification grant', async () => {
+  const preview = { id: 'goal:catalog', messageId: 'catalog', kind: 'goal', version: 2,
+    status: 'preview', title: '跟进目录校对', actions: [{ decision: 'enable', label: '开启提醒' }] };
+  const grant = await cardRequest(preview, 'enable');
+  assert.equal(grant?.text, '星舵操作 goal:catalog v2 enable');
+  assert.deepEqual(await cardRequest(structuredClone(preview), 'enable'), grant);
+  assert.equal(chatDisplayText(grant.text, new Map([[preview.id, preview]])), '开启提醒 · 跟进目录校对');
+  assert.deepEqual(await cardRequest({ ...preview, status: 'paused' }, 'enable'), grant);
+  for (const invalid of [{ ...preview, status: 'enabled' }, { ...preview, status: 'stopped' }, { ...preview, kind: 'rule' }, { ...preview, actions: [] }]) {
+    assert.equal(await cardRequest(invalid, 'enable'), null);
+  }
+});
+
+test('a stopped goal on its original turn stops polling while a preview keeps updating', async () => {
+  const rows = ['preview','stopped'].map(status => ({ id: status, seq: 1,
+    proactive: [{ kind: 'goal', id: 'goal:' + status, messageId: status, status, version: 1 }] }));
+  const page = { messages: [] };
+  const seen = [];
+  await refreshOlderWork(page, rows, async id => {
+    seen.push(id);
+    return { messages: rows.filter(row => row.id === id) };
+  });
+  assert.deepEqual(seen, ['preview']);
+});
+
+test('offered goal controls keep previewing and stopping distinct from enabling', async () => {
+  const goal = { kind: 'goal', id: 'goal:atlas', status: 'enabled', version: 4, actions: [
+    { decision: 'preview', label: '切回预览' }, { decision: 'stop', label: '停止跟进' }] };
+  for (const [decision, label] of [['preview', '切回预览'], ['stop', '停止跟进']]) {
+    const request = await cardRequest(goal, decision);
+    assert.equal(request?.text, '星舵操作 goal:atlas v4 ' + decision);
+    assert.equal(chatDisplayText(request.text), label);
+  }
+});
