@@ -8,7 +8,7 @@ const labels={enable:'开启提醒',preview:'仅预览',pause:'暂停跟进',sto
 const nextStatus={enable:'enabled',preview:'preview',pause:'paused',stop:'stopped'};
 const details={
   preview:'正在预览。下列示例显示哪些变化会提醒你，确认开启后才会发出提醒。',
-  enabled:'已开启提醒。只在出现新的相关结果、决定、阻碍或指定信号时通知你。',
+  enabled:'已开启提醒。之后出现符合这项目标提醒条件的新进展时，我会通知你。',
   paused:'跟进已暂停。再次开启后，从那一刻的新进展开始提醒。',
   stopped:'已停止跟进。'
 };
@@ -59,12 +59,13 @@ function signalMatches(signal,summary){
 }
 function displayFinding(fact,goal,current){
   const signals=goal.signals.length?goal.signals:defaultSignals;
-  const category=signals.includes(fact.importance);
+  const ownerDecision=goal.signals.includes('decision')&&fact.importance==='decision';
+  const category=signals.includes(fact.importance)&&(!ownerDecision||fact.stage==='decision-needed'&&fact.certainty==='reported');
   const signal=signals.find(signal=>!Object.hasOwn(reasons,signal)&&signalMatches(signal,fact.summary));
   const recent=current&&fact.freshness==='recent';
   const wouldNotify=Boolean(recent&&(category||signal));
   const notifyReason=!current?'近期索引未确认这条依据':!recent?'依据的时效不足':
-    signal?'符合关注信号「'+signal+'」':category?reasons[fact.importance]:'不在所选提醒范围内';
+    signal?'符合关注信号「'+signal+'」':category?(ownerDecision?'需要你决定':reasons[fact.importance]):'不在所选提醒范围内';
   const notificationText=wouldNotify?'目标「'+goal.title+'」 · '+(fact.deviceName||fact.deviceId)+' / '+
     (fact.agentName||fact.target)+'\n'+fact.sourceLabel+' · '+noticeTime.format(new Date(fact.at))+'\n'+fact.summary:'';
   return {...fact,...(!current?{freshness:'unknown'}:{}),wouldNotify,notifyReason,notificationText};
