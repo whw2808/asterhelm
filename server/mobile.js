@@ -517,9 +517,58 @@ function workPanel(work, panel) {
   for (const card of remaining.values()) card.remove();
   return panel;
 }
-const cardKinds = { candidate: '发现事项', rule: '常驻委托', work: '工作接续' };
+const cardKinds = { candidate: '发现事项', rule: '常驻委托', work: '工作接续', goal: '目标跟进' };
 const cardStatuses = { checking: '只读查证中', waiting: '等待决定', ignored: '已忽略', approved: '已立项',
-  active: '已登记', blocked: '待处理', ...workStates };
+  active: '已登记', blocked: '待处理', preview: '仅预览', enabled: '提醒已开启', stopped: '已停止', ...workStates };
+const certaintyLabels = { reported: 'Agent 自述', observed: '已观测', requested: '用户请求', unknown: '待核实' };
+const freshnessLabels = { recent: '近期记录', stale: '较早记录', unknown: '时间待核实' };
+const signalLabels = { result: '结果', decision: '需要决定', blocker: '阻碍', progress: '普通进展' };
+
+function evidenceMeta(fact) {
+  const time = stamp(fact.at);
+  const meta = node('div', [fact.sourceLabel, fact.sessionTitle, time ? '记录于 ' + time : '记录时间未知',
+    freshnessLabels[fact.freshness], certaintyLabels[fact.certainty]].filter(Boolean).join(' · '), 'evidence-meta');
+  if (time) meta.title = fact.at;
+  return meta;
+}
+
+function goalEvidence(panel, card, expanded) {
+  const signals = (card.signals || []).map(signal => signalLabels[signal] || signal);
+  const scope = [signals.length ? '关注 ' + signals.join('、') : '', card.until ? '截至 ' + stamp(card.until) : ''].filter(Boolean);
+  if (scope.length) panel.append(node('p', scope.join(' · '), 'work-next'));
+  const findings = card.findings || [];
+  const sample = findings.find(fact => fact.wouldNotify);
+  if (sample) {
+    panel.append(node('div', '提醒示例', 'goal-sample-label'),
+      node('blockquote', sample.notificationText || sample.summary, 'goal-sample'));
+  }
+  const sources = new Map();
+  for (const fact of findings) {
+    const key = JSON.stringify([fact.deviceId, fact.target, fact.sourceKind, fact.sourceId]);
+    if (!sources.has(key)) sources.set(key, []);
+    sources.get(key).push(fact);
+  }
+  for (const [key, facts] of sources) {
+    const first = facts[0];
+    const section = node('details', undefined, 'goal-evidence');
+    section.dataset.source = key;
+    section.open = expanded.has(key);
+    const owner = [first.deviceName, first.agentName].filter(Boolean).join(' · ');
+    const heading = node('summary', ['依据', owner].filter(Boolean).join(' · '));
+    heading.append(node('span', [first.sessionTitle || first.sourceLabel, stamp(first.at)].filter(Boolean).join(' · '), 'evidence-meta'));
+    section.append(heading);
+    for (const fact of facts) {
+      const entry = node('div', undefined, 'goal-finding');
+      if (fact.stageLabel) entry.append(node('strong', fact.stageLabel));
+      entry.append(node('p', fact.summary), evidenceMeta(fact));
+      const reason = [fact.wouldNotify ? '符合提醒条件' : '仅作进度参考', fact.notifyReason].filter(Boolean);
+      entry.append(node('p', reason.join(' · '), 'goal-reason'));
+      if (fact.wouldNotify && fact !== sample) entry.append(node('blockquote', fact.notificationText || fact.summary, 'goal-sample'));
+      section.append(entry);
+    }
+    panel.append(section);
+  }
+}
 
 // The server also keeps a plain-text report for older clients and notifications.
 function candidateReport(item) {
@@ -536,6 +585,7 @@ function renderProactive(message, item) {
     const showTitle = card.title && !(item.role === 'user' && item.text === card.title);
     const signature = JSON.stringify([card, showTitle]);
     if (renderedCards.get(panel) !== signature) {
+      const expanded = new Set(Array.from(panel.querySelectorAll('.goal-evidence[open]'), section => section.dataset.source));
       renderedCards.set(panel, signature);
       panel.dataset.card = card.id;
       panel.setAttribute('aria-label', [cardKinds[card.kind], card.title].filter(Boolean).join(' · '));
@@ -545,6 +595,7 @@ function renderProactive(message, item) {
       if (showTitle) panel.append(node('strong', card.title));
       const detail = (card.detail || '').split('\n').filter(line => line !== '建议：' + card.nextStep).join('\n');
       if (detail) panel.append(node('p', detail, 'proactive-detail'));
+      if (card.kind === 'goal') goalEvidence(panel, card, expanded);
       if (card.kind === 'candidate' && ['waiting','approved'].includes(card.status)) {
         if (card.goal) panel.append(node('p', '目标 · ' + card.goal, 'proactive-detail'));
         if (card.criteria?.length) panel.append(node('p', '验收 · ' + card.criteria.join('\n'), 'proactive-detail'));
@@ -799,6 +850,9 @@ function availability(worker) {
 function statusBadge(label, tone) {
   return node('span', label, 'status-badge ' + tone);
 }
+function activitySummary(fact) {
+  return fact.sourceKind === 'worker' ? '尚无可核实的工作步骤' : fact.summary;
+}
 function agentCard(agent, machine) {
   const card = node('button', undefined, 'agent-card');
   card.type = 'button';
@@ -811,7 +865,16 @@ function agentCard(agent, machine) {
   const arrow = node('span', '›', 'card-arrow');
   arrow.setAttribute('aria-hidden', 'true');
   card.append(agentLogo(agent), description, arrow);
-  card.setAttribute('aria-label', [machine.name, agent.name, status, tasks.length + ' 个任务', indexed ? sessions.length + ' 个会话' : '会话未接入'].join('，'));
+  const activity = agent.activity;
+  if (activity) {
+    const evidence = node('span', undefined, 'agent-activity');
+    const label = activity.sourceKind === 'worker' ? '心跳' : activity.stageLabel;
+    evidence.append(node('span', activitySummary(activity), 'activity-summary'),
+      node('span', [label, stamp(activity.at) || '记录时间未知'].filter(Boolean).join(' · '), 'evidence-meta'));
+    card.append(evidence);
+  }
+  card.setAttribute('aria-label', [machine.name, agent.name, status, activity && activitySummary(activity),
+    activity && stamp(activity.at), tasks.length + ' 个任务', indexed ? sessions.length + ' 个会话' : '会话未接入'].filter(Boolean).join('，'));
   card.onclick = () => {
     boardScroll = $('board').scrollTop; sessionLimit = 6;
     selectedAgent = { machine: machine.id, agent: agent.id };
@@ -876,6 +939,13 @@ function agentDetails(machine, agent) {
     group('进行中的任务', active, taskLine, { empty: '目前没有进行中的任务。' }),
     sessionGroup,
   ];
+  if (agent.activity) {
+    const fact = agent.activity;
+    const evidence = node('section', undefined, 'group agent-evidence');
+    evidence.append(node('h3', ['最近依据', fact.stageLabel].filter(Boolean).join(' · ')),
+      node('p', activitySummary(fact)), evidenceMeta(fact));
+    content.splice(1, 0, evidence);
+  }
   if (finished.length) content.push(group('已结束的任务', finished, taskLine, { collapsible: true }));
   return content;
 }

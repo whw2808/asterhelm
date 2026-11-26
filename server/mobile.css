@@ -98,6 +98,16 @@ input { width: 100%; margin-top: 4px; border: 1px solid var(--line); border-radi
 .proactive-detail { white-space: pre-wrap; line-height: 1.5; font-size: .9rem; margin: 5px 0; }
 .proactive-actions { display: flex; flex-wrap: wrap; gap: 5px 8px; margin-top: 7px; }
 .proactive-actions button { font-size: .86rem; }
+.goal-sample-label { margin-top: 8px; font-size: .79rem; font-weight: 650; color: var(--muted); }
+.goal-sample { margin: 4px 0 8px; border-inline-start: 3px solid var(--accent); padding: 5px 9px; white-space: pre-wrap; font-size: .94rem; line-height: 1.5; }
+.goal-evidence { border-top: 1px solid var(--line); }
+.goal-evidence summary { padding: 10px 0; font-size: .86rem; cursor: pointer; }
+.goal-evidence summary .evidence-meta { display: block; margin-inline-start: 1em; }
+.goal-finding { padding-bottom: 9px; font-size: .88rem; line-height: 1.5; }
+.goal-finding + .goal-finding { padding-top: 7px; border-top: 1px solid var(--line); }
+.goal-finding p, .agent-evidence p { margin: 0 0 4px; white-space: pre-wrap; }
+.goal-reason { color: var(--muted); font-size: .82rem; }
+.evidence-meta { font-size: .76rem; color: var(--muted); line-height: 1.45; }
 .work-list { list-style: none; margin: 10px 0 0 calc(var(--avatar) + var(--gutter)); padding: 0; border-radius: 18px; background: #fbfbffd9; border: 1px solid #ffffffb8; box-shadow: var(--shadow); }
 .work-list:empty { display: none; }
 .work-card { padding: 0 12px; min-width: 0; overflow-wrap: anywhere; }
@@ -199,6 +209,10 @@ textarea::placeholder { color: #696e8c; }
 .agent-name { display: block; font-size: clamp(13px,3.6vw,18px); line-height: 1.22; letter-spacing: -.025em; overflow-wrap: anywhere; }
 .card-arrow { justify-self: end; font-size: 1.15rem; color: #737795; }
 .agent-description { min-width: 0; display: flex; flex-direction: column; align-items: start; gap: 3px; }
+.agent-activity { grid-column: 1 / -1; min-width: 0; display: grid; gap: 3px; overflow-wrap: anywhere; }
+.activity-summary { font-size: .84rem; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.agent-evidence { padding-bottom: 10px; overflow-wrap: anywhere; }
+.agent-evidence p { margin: 6px 0 4px; font-size: .92rem; }
 .status-badge { color: var(--muted); font-size: .76rem; line-height: 1.4; }
 .machine-subtitle .status-badge { font-size: inherit; }
 .agent-metrics { font-size: .85rem; color: var(--muted); margin-left: auto; }

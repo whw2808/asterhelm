@@ -7,7 +7,7 @@ export function groupBoard({workers,tasks,sessions,coverage}){
     const machine=devices.get(id);
     machine.online ||= Boolean(worker.online);
     const agent={id:worker.target,name:worker.agentName,kind:worker.kind,aliases:worker.aliases??[],
-      capabilities:worker.capabilities??[],worker,sessionsIndexed:false,tasks:[],sessions:[]};
+      capabilities:worker.capabilities??[],activity:worker.activity??null,worker,sessionsIndexed:false,tasks:[],sessions:[]};
     machine.agents.push(agent);
     byTarget.set(agent.id,agent);
     for(const source of worker.contextSources??[]){
