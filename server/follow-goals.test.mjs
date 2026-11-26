@@ -48,7 +48,7 @@ test('a preview stays in its original chat with attributed examples across devic
   assert.equal(preview.kind,'goal');assert.equal(preview.status,'preview');assert.equal(preview.messageId,creation.id);
   assert.deepEqual(new Set(preview.findings.map(x=>x.deviceId)),new Set(['desk','bench']));
   assert.ok(preview.findings.every(x=>x.wouldNotify&&x.notificationText.includes(x.summary)&&x.notifyReason));
-  assert.ok(preview.findings.every(x=>x.notificationText.includes(x.sourceLabel)&&x.notificationText.includes(x.at)));
+  assert.ok(preview.findings.every(x=>x.notificationText.includes(x.sourceLabel)&&x.notificationText.includes('GMT')&&!x.notificationText.includes(x.at)));
   assert.deepEqual(f.notices(),[]);
   assert.equal(f.register(spec,'follow-atlas').id,creation.id);
   assert.deepEqual(f.goals.cards(new Set([creation.id])),[preview]);

@@ -13,6 +13,8 @@ const details={
   stopped:'已停止跟进。'
 };
 const reasons={result:'出现新的结果',decision:'有新的决定或需要确认',blocker:'遇到阻碍',progress:'出现普通进展'};
+const noticeTime=new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',
+  hour:'2-digit',minute:'2-digit',hour12:false,timeZoneName:'shortOffset'});
 const defaultSignals=['result','decision','blocker'];
 const activeSelection="status IN ('preview','enabled') AND (untilAt IS NULL OR untilAt>?)";
 const maxScanAge=120000;
@@ -64,7 +66,7 @@ function displayFinding(fact,goal,current){
   const notifyReason=!current?'近期索引未确认这条依据':!recent?'依据的时效不足':
     signal?'符合关注信号「'+signal+'」':category?reasons[fact.importance]:'不在所选提醒范围内';
   const notificationText=wouldNotify?'目标「'+goal.title+'」 · '+(fact.deviceName||fact.deviceId)+' / '+
-    (fact.agentName||fact.target)+'\n'+fact.sourceLabel+' · '+fact.at+'\n'+fact.summary:'';
+    (fact.agentName||fact.target)+'\n'+fact.sourceLabel+' · '+noticeTime.format(new Date(fact.at))+'\n'+fact.summary:'';
   return {...fact,...(!current?{freshness:'unknown'}:{}),wouldNotify,notifyReason,notificationText};
 }
 
