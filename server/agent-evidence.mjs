@@ -52,7 +52,9 @@ const isControl=text=>controlPatterns.some(pattern=>pattern.test(text));
 const blocked=/阻塞|阻碍|受阻|卡在|卡住|缺失|仍缺|尚缺|被拒|无法(?:继续|运行|完成|访问)|未能(?:完成|运行)|(?:验证|运行|检查|实验|测试)(?:失败|未通过|没有通过)|\b(?:blocked|blocking|stalled|missing|failed|no (?:tests?|checks?) passed|couldn.t complete|unable to (?:run|complete|proceed))\b/iu;
 const resolvedBlocker=/\b(?:no longer|not) (?:blocked|stalled)|\b(?:zero|0) (?:checks? |tests? )?failed\b|(?:已解除|不再)(?:阻塞|受阻)|阻塞已解除/giu;
 const decision=/我(?:们)?(?:已)?(?:决定|选定|选择采用)|决定(?:采用|保留|停止|继续|改用)|最终选定|\b(?:I|we) (?:have )?(?:decided|chose|selected|approved)\b/iu;
-const needsDecision=/需要(?:你|用户)(?:来)?(?:选择|决定|确认|批准)|等待(?:你|用户)(?:的)?(?:决定|批准|确认)|\b(?:needs? (?:your|owner) (?:decision|approval)|awaiting (?:your|user) (?:approval|decision))\b/iu;
+// Remove negated requests before looking for a still-open decision in the same sentence.
+const closedDecision=/(?:不再|不|并非|如果|假如|若)(?:需要|等待)(?:你|用户)(?:来|的)?(?:选择|决定|确认|批准|拍板)|\b(?:no longer|not|never|doesn['’]t|does not)\s+(?:needs?|awaiting)\s+(?:your|user|owner)\s+(?:approval|decision)\b/giu;
+const needsDecision=/(?:需要|请)(?:你|用户)(?:来)?(?:选择|决定|确认|批准|拍板)|等待(?:你|用户)(?:的)?(?:决定|批准|确认|拍板)|\b(?:needs? (?:your|owner) (?:decision|approval)|awaiting (?:your|user) (?:approval|decision))\b/iu;
 const resultPatterns=[
   /跑完|已(?:经)?(?:完成|验证|交付|生成|导出|修复|实现|训练|更新|测得|发布|通过)|(?:校验|核验|验证|生成|对比|比较|测量|测得|修复|复现|完成|确认|证明|训完|新增|下降|提高|升至|降至)了|实测|测得|实验结果|结果显示|误差为/u,
   /\b(?:completed|finished|calibrated|measured|stabilized|passed|reproduced|verified|exported|delivered|published|reduced|improved|generated|reached|achieved|returned|fixed|implemented|validated|tested)\b/iu,
@@ -66,7 +68,7 @@ const uncertain=[
   /\b(?:not|never|not yet|yet to) (?:been )?(?:complete[d]?|verify|verified|tested|passed|confirmed|finished)\b/iu,
 ];
 function classify(line,role){
-  if(needsDecision.test(line))return {stage:'decision-needed',importance:'decision'};
+  if(role==='assistant'&&needsDecision.test(line.replace(closedDecision,'')))return {stage:'decision-needed',importance:'decision'};
   if(/[？?]\s*$/u.test(line)||uncertain.some(pattern=>pattern.test(line)))return null;
   if(decision.test(line))return {stage:'decision',importance:'decision'};
   if(role!=='assistant')return null;

@@ -148,3 +148,21 @@ test('a failed observation rolls back its delivery and can retry without losing 
   f.restart();f.observe([row],4000);f.observe([row],5000);
   assert.equal(f.goals.get(card.id).findings.length,1);assert.equal(f.notices().length,1);
 });
+
+test('an explicitly requested decision alert waits for the owner and never replays the preview',t=>{
+  const f=setup(t),{card}=f.register({...spec,signals:['result','blocker','decision']});
+  const prior=session('desk','Cobalt atlas','Completed the Cobalt atlas index.',-4000);
+  f.observe([prior],1000);f.choose(card,'enable');
+  const choice=session('desk','Cobalt atlas','We chose the Cobalt atlas cover stock.',2000);
+  const settled=session('bench','Cobalt atlas','Cobalt atlas no longer needs your approval.',2300);
+  const delegated=session('desk','Cobalt atlas','Cobalt atlas needs your decision on paper weight.',2500);
+  delegated.evidence[0].role='user';
+  const cleared=session('bench','Cobalt atlas','Cobalt atlas 不需要你再确认，也不需要你决定。',2700);
+  f.observe([prior,choice,settled,delegated,cleared],3000);
+  assert.equal(f.notices().length,0);
+  const ask=session('bench','Cobalt atlas','Cobalt atlas needs your decision on the cover stock.',4000);
+  f.observe([prior,choice,settled,delegated,ask],5000);
+  assert.equal(f.notices().length,1);
+  assert.match(f.notices()[0].text,/needs your decision on the cover stock/);
+  assert.doesNotMatch(f.notices()[0].text,/Completed|We chose|weight|no longer/);
+});
