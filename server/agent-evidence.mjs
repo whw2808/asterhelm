@@ -56,7 +56,7 @@ const decision=/我(?:们)?(?:已)?(?:决定|选定|选择采用)|决定(?:采�
 const closedDecision=/(?:不再|不|并非|如果|假如|若)(?:需要|等待)(?:你|用户)(?:来|的)?(?:选择|决定|确认|批准|拍板)|\b(?:no longer|not|never|doesn['’]t|does not)\s+(?:needs?|awaiting)\s+(?:your|user|owner)\s+(?:approval|decision)\b/giu;
 const needsDecision=/(?:需要|请)(?:你|用户)(?:来)?(?:选择|决定|确认|批准|拍板)|等待(?:你|用户)(?:的)?(?:决定|批准|确认|拍板)|\b(?:needs? (?:your|owner) (?:decision|approval)|awaiting (?:your|user) (?:approval|decision))\b/iu;
 const resultPatterns=[
-  /跑完|已(?:经)?(?:完成|验证|交付|生成|导出|修复|实现|训练|更新|测得|发布|通过)|(?:校验|核验|验证|生成|对比|比较|测量|测得|修复|复现|完成|确认|证明|训完|新增|下降|提高|升至|降至)了|实测|测得|实验结果|结果显示|误差为/u,
+  /跑完|已(?:经)?(?:完成|训完|验证|交付|生成|导出|修复|实现|训练|更新|测得|发布|通过)|(?:校验|核验|验证|生成|对比|比较|测量|测得|修复|复现|完成|确认|证明|训完|新增|下降|提高|升至|降至)了|实测|测得|实验结果|结果显示|误差为/u,
   /\b(?:completed|finished|calibrated|measured|stabilized|passed|reproduced|verified|exported|delivered|published|reduced|improved|generated|reached|achieved|returned|fixed|implemented|validated|tested)\b/iu,
 ];
 const progress=/正在|已开始|已启动|处理中|运行中|排查中|进行中|\b(?:working on|started|checking|investigating|running|in progress|processing|under way)\b/iu;
@@ -193,7 +193,7 @@ function termsFor(goal){
     }
   }
   return [...terms].slice(0,40).map(term=>({term,match:new RegExp((/^[\da-z]/u.test(term)?'(?<![a-z0-9])':'')+
-    RegExp.escape(term)+(/[\da-z]$/u.test(term)?'(?![a-z0-9])':''),'iu')}));
+    RegExp.escape(term)+(/[a-z]$/u.test(term)?'(?=$|[^a-z0-9]|[0-9]+(?![a-z0-9]))':/\d$/u.test(term)?'(?![a-z0-9])':''),'iu')}));
 }
 function anchors(terms,text){
   const normalized=text.normalize('NFKC');
@@ -210,7 +210,7 @@ function factWithKey(worker,fact){
 function exact(scope,row){
   return scope?.machine===row.machine&&scope.id===row.id&&(!scope.target||scope.target===row.target);
 }
-function sourceFindings(worker,row,goal,terms,now){
+function sourceFindings(worker,row,goal,terms,contrasts,now,retracted){
   if(row.visibility!=='recent-dialogue'||!registeredRow(worker,row)||exact(goal.origin,row)||isControl(row.title))return [];
   const scoped=list(goal.scopes).length>0;
   if(scoped&&!goal.scopes.some(s=>exact(s,row)))return [];
@@ -226,18 +226,28 @@ function sourceFindings(worker,row,goal,terms,now){
       const request=items.find(e=>e.role==='user'&&e.turnId&&e.turnId===item.turnId&&e!==item);
       const topical=anchors(terms,visibleMessage(request)||'');
       // A second anchor in the same message, or a corroborating request under a matching title.
-      if(hits.length<2&&!(topical.some(t=>!hits.includes(t))&&anchors(terms,row.title).length>=2))continue;
+      const titleHits=anchors(terms,row.title);
+      const qualifiedTitle=contrasts.length&&contrasts.every(group=>group.some(t=>hits.includes(t)))&&titleHits.some(t=>!hits.includes(t));
+      if(hits.length<2&&!qualifiedTitle&&!(topical.some(t=>!hits.includes(t))&&titleHits.length>=2))continue;
     }
     const parts=sentences(text);
     const candidates=parts.flatMap((line,i)=>{
       const kind=classify(line,item.role);
       if(!kind)return [];
+      // A sibling's qualifier in another paragraph cannot attribute this reported step.
+      if(!scoped&&contrasts.some(group=>!anchors(group,line).length))return [];
       const local=anchors(terms,line).length;
       if(!scoped && !local && !anchors(terms,[parts[i-1],parts[i+1]].filter(Boolean).join(' ')).length)return [];
       return [{line,i,kind,weight:(local?3:0)+(kind.importance==='progress'?0:2)}];
     }).sort((a,b)=>b.weight-a.weight);
     const best=candidates[0];
-    if(!best)continue;
+    if(!best){
+      if(!scoped&&contrasts.length){
+        const source={sourceKind:'dialogue',sourceId:row.id,turnId:item.turnId,itemId:item.itemId};
+        retracted.push(factWithKey(worker,source).key);
+      }
+      continue;
+    }
     const evidence=parts.slice(best.i,best.i+3).join(' ');
     const event=dialogue(row,item,evidence,best.kind,now);
     if(event)matches.push(factWithKey(worker,event));
@@ -245,20 +255,29 @@ function sourceFindings(worker,row,goal,terms,now){
   return matches;
 }
 
-export function goalFindings({goal,rows=[],workers=[],tasks=[],now}={}){
-  if(!goal?.title || (goal.scopes!=null&&!Array.isArray(goal.scopes)))return [];
+export function goalProjection({goal,otherGoals=[],rows=[],workers=[],tasks=[],now}={}){
+  const retracted=[];
+  if(!goal?.title || (goal.scopes!=null&&!Array.isArray(goal.scopes)))return {findings:[],retracted};
   const time=clock(now),terms=termsFor(goal),scoped=list(goal.scopes).length>0;
-  if(!scoped&&terms.length<2)return [];
+  if(!scoped&&terms.length<2)return {findings:[],retracted};
+  const contrasts=[];
+  for(const other of otherGoals){
+    if(other.title===goal.title)continue;
+    const theirs=new Set(termsFor(other).map(t=>t.term));
+    const distinctive=terms.filter(t=>!theirs.has(t.term));
+    const sharedCount=terms.length-distinctive.length;
+    if(distinctive.length&&theirs.size>sharedCount&&sharedCount>=2)contrasts.push(distinctive);
+  }
   const targets=new Map(list(workers).filter(w=>w?.deviceId&&w.target).map(w=>[w.target,w]));
   const found=[];
   for(const row of list(rows)){
     const worker=targets.get(row?.target);
-    if(worker)found.push(...sourceFindings(worker,row,goal,terms,time));
+    if(worker)found.push(...sourceFindings(worker,row,goal,terms,contrasts,time,retracted));
   }
   // A session grant cannot establish a link to a separately dispatched task.
   if(!scoped)for(const task of list(tasks)){
     const worker=targets.get(task?.target),title=task?taskTopic(task):'';
-    if(!worker||!title||isControl(title)||generated.test(title)||anchors(terms,title).length<2)continue;
+    if(!worker||!title||isControl(title)||generated.test(title)||anchors(terms,title).length<2||contrasts.some(group=>!anchors(group,title).length))continue;
     const event=taskFact(worker,task,time);
     if(event&&event.stage!=='queued')found.push(factWithKey(worker,event));
   }
@@ -272,5 +291,7 @@ export function goalFindings({goal,rows=[],workers=[],tasks=[],now}={}){
   // Reserve a place for each agent before filling the remaining slots by recency.
   const latest=[...agents.values()].map(facts=>facts.shift());
   const remaining=[...agents.values()].flat().sort(newest);
-  return latest.concat(remaining).slice(0,60).sort(newest);
+  return {findings:latest.concat(remaining).slice(0,60).sort(newest),retracted};
 }
+
+export function goalFindings(input){return goalProjection(input).findings;}

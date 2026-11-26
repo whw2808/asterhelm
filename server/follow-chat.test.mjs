@@ -42,3 +42,19 @@ test('turning notifications off keeps following; pausing the goal stops its obse
   assert.equal(followIntent('关闭这个目标的推送').decision,'preview');
   assert.equal(followIntent('暂停目标关注').decision,'pause');
 });
+
+test('a topic can precede the follow verb; references and quoted errors stay separate',()=>{
+  for(const text of ['纸本目录的也跟进','纸本目录也帮我盯一下','把纸本目录也持续跟进']){
+    assert.equal(followIntent(text)?.spec?.title,'纸本目录',text);
+  }
+  for(const text of ['这份工作也跟进','对啊我让你把这份工作也跟进，为什么回复我：无法登记提醒','也跟进刚才说的那个项目']){
+    assert.equal(followIntent(text)?.kind,'reference',text);
+  }
+  for(const text of ['如果纸本目录也跟进会怎样','别把纸本目录也跟进','为什么纸本目录也跟进？','他说“纸本目录也跟进”','替我问问纸本目录也跟进了吗']){
+    assert.equal(followIntent(text),null,text);
+  }
+});
+test('a spoken correction retains its command when the acknowledgment is followed by a comma',()=>{
+  assert.equal(followIntent('对啊，我让你把刚才那项工作也跟进，为什么没登记？')?.kind,'reference');
+  assert.equal(followIntent('纸本目录的也跟进吗？'),null);
+});

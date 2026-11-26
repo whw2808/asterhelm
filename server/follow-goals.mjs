@@ -1,5 +1,5 @@
 import {createHash} from 'node:crypto';
-import {goalFindings} from './agent-evidence.mjs';
+import {goalProjection} from './agent-evidence.mjs';
 
 const actions={
   preview:['enable','pause','stop'],enabled:['preview','pause','stop'],paused:['preview','enable','stop'],stopped:[]
@@ -90,6 +90,18 @@ export class FollowGoals{
       if(existing)return existing;
       requireThat(user.state==='new','请在当前的手机消息中说明要跟进的目标。');
       const spec=goalSpec(input,Date.parse(user.createdAt));
+      const open=this.db.prepare('SELECT * FROM follow_goals WHERE '+activeSelection).all(Date.now());
+      for(const row of open){
+        const prior=JSON.parse(row.spec);
+        if(prior.title.normalize('NFKC').toLowerCase()!==spec.title.normalize('NFKC').toLowerCase()||
+          JSON.stringify(prior.scopes)!==JSON.stringify(spec.scopes)||(spec.until&&spec.until!==prior.until)||
+          (spec.signals.length&&JSON.stringify([...spec.signals].sort())!==JSON.stringify([...prior.signals].sort())))continue;
+        if(row.status==='preview'){
+          prior.terms=[...new Set([...prior.terms,...spec.terms])].slice(0,32);
+          this.db.prepare('UPDATE follow_goals SET spec=? WHERE id=?').run(JSON.stringify(prior),row.id);
+        }
+        return this.get(row.id);
+      }
       this.db.prepare("INSERT INTO follow_goals(id,messageId,spec,status,untilAt) VALUES(?,?,?,'preview',?)")
         .run(id,turn.id,JSON.stringify(spec),spec.until?Date.parse(spec.until):null);
       return this.get(id);
@@ -122,7 +134,7 @@ export class FollowGoals{
     // Keep a busy device from displacing the latest phase and citations of other agents.
     const records=this.db.prepare(`SELECT fact,scan,at FROM (
       SELECT fact,scan,at,factKey,row_number() OVER (PARTITION BY deviceId,target ORDER BY at DESC,factKey) AS rank
-      FROM follow_goal_findings WHERE goalId=?
+      FROM follow_goal_findings WHERE goalId=? AND scan>=0
     ) WHERE rank<=4 ORDER BY rank,at DESC,factKey`).all(row.id);
     const scanRecent=Date.now()-row.observedAt<=maxScanAge;
     const findings=records.map(record=>displayFinding(JSON.parse(record.fact),goal,scanRecent&&record.scan===row.scan));
@@ -157,9 +169,14 @@ export class FollowGoals{
     return inTransaction(this.store,()=>{
       this.expire(now);
       const active=this.db.prepare("SELECT * FROM follow_goals WHERE status IN ('preview','enabled') AND (observedAt IS NULL OR observedAt<=?)").all(now);
+      // A remembered sibling still identifies a different topic when its own follow-up is paused.
+      const otherGoals=active.length?this.db.prepare('SELECT spec FROM follow_goals').all().map(r=>JSON.parse(r.spec)):[];
       for(const row of active){
         const goal=JSON.parse(row.spec),scan=row.scan+1;
-        const findings=goalFindings({goal,rows,workers,tasks,coverage,now});
+        const {findings,retracted}=goalProjection({goal,otherGoals,rows,workers,tasks,coverage,now});
+        // Retain the original fact key so that reclassification never replays an old alert.
+        if(retracted.length)this.db.prepare('UPDATE follow_goal_findings SET scan=-1 WHERE goalId=? AND factKey IN (SELECT value FROM json_each(?))')
+          .run(row.id,JSON.stringify(retracted));
         const alerts=[];
         for(const finding of findings){
           // Persist only the evidence DTO. Poll times, raw messages and inputs are not fact identity.
