@@ -132,15 +132,15 @@ test('a one-shot current condition uses an existing registered-agent status imme
   assert.equal(f.notices().length,1);assert.equal(f.rules.cards()[0].status,'completed');
 });
 
-test('an invented monitor, widened scope, quoted instruction or upgraded notification cannot grant recurring execution',t=>{
+test('a rule needs a signed source excerpt, a supported effect and an observable trigger',t=>{
   const f=rig(t);
-  const review={...failure,effect:'consult',target:'desk.code'};
-  assert.throws(()=>f.add(notify,review));
-  assert.throws(()=>f.add('请解释这句话：“'+consult+'”',review));
-  assert.throws(()=>f.add(notify,{...failure,match:undefined}));
+  assert.throws(()=>f.add(notify,{...failure,evidence:'另一条留言'}));
+  assert.throws(()=>f.add(notify,{...failure,effect:'dispatch'}));
+  assert.throws(()=>f.add(notify,{...failure,trigger:'wind_changed'}));
+  assert.throws(()=>f.add(notify,{trigger:['task_failed']}));
   assert.throws(()=>f.add(notify,failure,{wakeCursor:null}));
-  assert.throws(()=>f.add('这段话是什么意思？',failure));
-  assert.throws(()=>f.add('明早提醒我看图册',{trigger:'time',repeat:'daily',dueAt:'2026-03-06T09:00:00Z'}));
+  assert.throws(()=>f.add(notify,{...failure,sourceTarget:'missing.agent'}));
+  assert.throws(()=>f.add(notify,{...failure,taskId:'missing-task'}));
   assert.equal(f.rules.cards().length,0);
 });
 
@@ -162,11 +162,12 @@ test('a scheduled rule reconciles its last due report after the end date, and cl
   assert.equal(f.notices().length,1);assert.equal(f.rules.cards()[0].status,'completed');
 });
 
-test('registration rejects a check when isolation is unavailable and protects a scoped task qualifier',t=>{
-  const f=rig(t);
-  assert.throws(()=>f.add(consult,{...failure,effect:'consult',target:'desk.code'},{workers:f.queue.workers().map(w=>({...w,isolatedRead:false}))}));
-  assert.throws(()=>f.add('每次新的纸本校对任务失败都提醒我',{...failure,match:'任务'}));
-  assert.throws(()=>f.add('能不能举例说明每次新的校对任务失败就让 desk.code 做一次只读复核是什么意思',{...failure,effect:'consult',target:'desk.code'}));
+test('review requires an isolated read-only worker with available credentials',t=>{
+  const f=rig(t),review={...failure,effect:'consult',target:'desk.code'};
+  for(const override of [{isolatedRead:false},{capabilities:['workspace-write']},{needsCredentials:true}]){
+    assert.throws(()=>f.add(consult,review,{workers:f.queue.workers().map(w=>({...w,...override}))}));
+  }
+  assert.equal(f.rules.cards().length,0);
 });
 
 test('only the originating reviewer receives a bounded copy of its own terminal evidence',async t=>{
@@ -206,10 +207,16 @@ test('an observational gap and reacquisition cannot widen a rule past the origin
   assert.equal(f.rules.cards()[0].status,'blocked');
 });
 
-test('quoted task names work, but text from inside a quotation cannot authorize an action',t=>{
+test('task titles containing command words are literal event filters',async t=>{
   const f=rig(t);
-  f.add('每次“纸本校对”任务失败都提醒我',{trigger:'task_failed',match:'纸本校对'});
-  assert.throws(()=>f.add('上条消息是：“'+consult+'”',{...failure,effect:'consult',target:'desk.code'}));
+  f.add('Si «cancel» échoue, un mot sur mon téléphone.',{
+    trigger:'task_failed',match:'cancel',sourceTarget:'',dueAt:'',endAt:'',
+  });
+  f.event('other-exhibit',1,{title:'Photo catalogue'});
+  f.event('matching-exhibit',2,{title:'Cancel — exhibit catalogue'});
+  await f.tick(ms+3000);
+  assert.equal(f.notices().length,1);
+  assert.match(f.notices()[0],/matching-exhibit/);
 });
 
 test('an event source that fails backs off and retries without swallowing its unprocessed receipt',async t=>{
@@ -238,7 +245,7 @@ test('registered snapshot monitors record loss of visibility without disclosing 
 test('inputs held for a new decision freeze notifications and release once the decision is classified',async t=>{
   const f=rig(t);
   f.add(notify,failure);
-  const correction=f.store.receive({requestId:'later',text:'等我确认目录范围'});
+  const correction=f.store.receive({requestId:'later',text:'Il faut mon accord avant de poursuivre.'});
   f.event('wait',1);await f.tick(ms+5000);
   assert.equal(f.notices().length,0);
   f.store.finish(correction,'已收到');
@@ -252,12 +259,18 @@ test('the phone can select one page of rules by the original grant messages',t=>
   assert.ok(f.rules.cards().some(c=>c.messageId===one.id));
 });
 
-test('ambiguous desktop titles or another connector on the same device cannot receive review permission',t=>{
-  const f=rig(t);
+test('session monitoring pins a live source by machine and id and consults only its owning connector',t=>{
+  const f=rig(t),row={machine:'desk',target:'desk.code',id:'same-title-a',title:'展厅清单',updatedAt:instant};
+  const event={trigger:'session_changed',machine:'desk',sessionId:row.id};
+  const text='Ce dossier-ci mérite un suivi.';
+  for(const sessions of [[],[{...row,archived:true}],[{...row,machine:'bench'}]]){
+    assert.throws(()=>f.add(text,event,{sessions}));
+  }
   const workers=f.queue.workers(),own=workers.find(w=>w.target==='desk.code');
-  assert.throws(()=>f.add(consult,{...failure,effect:'consult',target:'desk.archive'},{workers:[...workers,{...own,target:'desk.archive',agentName:'Archive'}]}));
-  const row={machine:'desk',target:'desk.code',id:'same-title-a',title:'展厅清单',updatedAt:instant};
-  assert.throws(()=>f.add('每次展厅清单会话更新都提醒我',{trigger:'session_changed',machine:'desk',sessionId:row.id},{sessions:[row,{...row,id:'same-title-b'}]}));
+  const other={...own,target:'desk.archive',agentName:'Archive'};
+  assert.throws(()=>f.add(text,{...event,effect:'consult',target:other.target},{sessions:[row],workers:[own,other]}));
+  f.add(text,event,{sessions:[{...row,id:'same-title-b'},row]});
+  assert.match(f.rules.cards()[0].detail,/same-title-a/);
 });
 
 test('a reviewer with a blocked occurrence clears the mobile blockage once the same request resumes',async t=>{
@@ -276,31 +289,27 @@ test('an expired consult does not acquire a new worker task after a long shutdow
   assert.equal(f.queue.list().length,0);assert.equal(f.rules.cards()[0].status,'completed');
 });
 
-test('ordinary notification wording and a natural task filter work without inventing a timer for an unavailable external condition',async t=>{
-  const f=rig(t);
-  f.add('Whenever a new proofreading task fails, let me know.',{trigger:'task_failed',match:'proofreading'});
-  f.event('single',1,{title:'proofreading the gallery label'});await f.tick(ms+2000);
+test('a calendar rule keeps the local time and weekday schedule for a paraphrased instruction',async t=>{
+  const f=rig(t),text='Les jours ouvrés à neuf heures, un mot pour relire le catalogue.';
+  f.add(text,{trigger:'time',repeat:'weekdays',dueAt:'2026-03-06T09:00:00+01:00',timeZone:'Europe/Paris'});
+  await f.tick(Date.parse('2026-03-06T08:00:00Z'));
   assert.equal(f.notices().length,1);
-  assert.throws(()=>f.add('外面起风的时候通知我',{trigger:'time',repeat:'once',dueAt:'2026-03-06T09:00:00Z'}));
+  assert.equal(f.rules.cards()[0].nextAt,'2026-03-09T08:00:00.000Z');
 });
 
-test('one grant can stage only one action across duplicate planner positions and retries; distinct user clauses remain independent',async t=>{
-  const f=rig(t);
-  const second='每次新的图册运输任务成功都提醒我';
-  const text=notify+'。'+second;
-  const turn={...f.store.receive({requestId:'two-clauses',text}),text};
+test('rules can share the same evidence and exact duplicate proposals keep one registration across retries',async t=>{
+  const f=rig(t),text='校对每次失败、图册运输每次成功，都给我一个提醒。';
+  const turn={...f.store.receive({requestId:'shared-clause',text}),text};
   const snap={now:instant,timeZone:'UTC',wakeCursor:0,workers:f.queue.workers(),tasks:[],sessions:[]};
-  const check=(evidence,fields)=>f.rules.check({type:'wake_rule',repeat:'each',effect:'notify',evidence,...fields},turn,snap);
-  const first=check(notify,failure);
-  const equivalent=check(notify+'。',failure);
-  const other=check(second,{trigger:'task_succeeded',match:'图册运输'});
-  assert.equal(f.rules.uniqueGrants([first,equivalent,other]).length,2);
-  const conflict={...first,repeat:'once'}; // Also fence inconsistent grants in a saved plan.
-  assert.throws(()=>f.rules.uniqueGrants([first,conflict]),/委托/);
+  const check=(fields,cursor)=>f.rules.check({type:'wake_rule',repeat:'each',effect:'notify',evidence:text,...fields},turn,{...snap,wakeCursor:cursor});
+  const first=check(failure,0),retry=check(failure,7);
+  const other=check({trigger:'task_succeeded',match:'图册运输'},0);
+  assert.deepEqual(f.rules.uniqueGrants([first,retry,other]),[first,other]);
   f.rules.register('first',turn,first);
-  assert.equal(f.rules.register('second-position',turn,equivalent).id,'first');
-  assert.throws(()=>f.rules.register('conflict',turn,conflict),/委托/);
   f.rules.register('other',turn,other);
+  f.restart();
+  assert.equal(f.rules.register('duplicate-position',turn,retry).id,'first');
+  assert.equal(f.rules.cards().length,2);
   f.store.finish(turn,'已登记');
   f.event('paper',1);f.event('shipping',2,{state:'succeeded',title:'图册运输'});
   await f.tick(ms+5000);assert.equal(f.notices().length,2);
@@ -318,22 +327,76 @@ test('separate reminders at the same hour keep the individual subject of each gr
   assert.equal(f.notices().length,2);assert.ok(f.notices().every(n=>!(n.includes('展柜')&&n.includes('纸本'))));
 });
 
-test('explicit manual cancellation keeps a recurring grant open in Chinese and English, without converting external stop conditions into dates',t=>{
+test('overlapping excerpts at one scheduled time keep the two distinct reminder subjects',async t=>{
+  const f=rig(t),text='每天九点分别给我两条提醒，第一条写「展柜图册」，第二条写「展柜」。';
+  const turn={...f.store.receive({requestId:'overlapping-labels',text}),text};
+  const actions=['展柜图册','展柜'].map(evidence=>f.rules.check({type:'wake_rule',trigger:'time',
+    repeat:'daily',dueAt:'2026-03-06T09:00:00Z',evidence},turn,{now:instant,timeZone:'UTC'}));
+  const rules=f.rules.uniqueGrants(actions);
+  assert.equal(rules.length,2);
+  rules.forEach((g,i)=>f.rules.register('schedule-'+i,turn,g));f.store.finish(turn,'已登记');
+  await f.tick(Date.parse('2026-03-06T09:00:00Z'));
+  assert.deepEqual(f.rules.cards().map(c=>c.title).sort(),['展柜','展柜图册']);
+  assert.equal(f.notices().length,2);
+});
+
+test('event machine qualifiers resolve to the registered source device',t=>{
+  const f=rig(t);
+  for(const event of [failure,{trigger:'task_succeeded'},{trigger:'agent_online'}]){
+    assert.throws(()=>f.add(notify,{...event,sourceTarget:'desk.code',machine:'bench'}));
+    assert.throws(()=>f.add(notify,{...event,machine:'desk'}));
+    const turn=f.add(notify,{...event,sourceTarget:'desk.code',machine:'desk'});
+    const spec=JSON.parse(f.rules.rule(turn.id+'-0').spec);
+    assert.equal(spec.sourceDevice,'desk');assert.equal(spec.sourceTarget,'desk.code');
+  }
+});
+
+test('an open rule has no deadline and bounded rules require valid instants in range',t=>{
   const f=rig(t);
   f.add('每次新的图册校对任务失败都提醒我，直到我取消',{trigger:'task_failed',match:'图册校对'});
   f.add('Whenever a proofreading task fails, notify me until I cancel.',{trigger:'task_failed',match:'proofreading'});
   assert.equal(f.rules.cards().filter(c=>c.status==='active'&&c.nextAt===null).length,2);
-  assert.throws(()=>f.add('每次新的图册校对任务失败都提醒我，直到鸟类迁徙结束',{trigger:'task_failed',match:'图册校对',endAt:'2027-01-01T00:00:00Z'}));
-  assert.throws(()=>f.add('每次新的图册校对任务失败都提醒我，直到我取消',{trigger:'task_failed',match:'图册校对',endAt:'2027-01-01T00:00:00Z'}));
-  assert.throws(()=>f.add('每次新的图册校对任务失败都提醒我，直到鸟类迁徙结束',{trigger:'task_failed',match:'图册校对',evidence:'每次新的图册校对任务失败都提醒我'}));
+  for(const endAt of ['2026-03-06','invalid','2026-03-04T12:00:00Z','2026-04-31T12:00:00Z']){
+    assert.throws(()=>f.add(notify,{...failure,endAt}));
+  }
+  const schedule={trigger:'time',repeat:'weekdays',dueAt:'2026-03-06T09:00:00Z'};
+  assert.throws(()=>f.add(notify,{...schedule,endAt:'2026-03-06T08:59:00Z'}));
+  assert.throws(()=>f.add(notify,{...schedule,dueAt:'2026-03-07T09:00:00Z'}));
+  assert.throws(()=>f.add(notify,{...schedule,timeZone:'Planet/Nowhere'}));
 });
 
-test('registration preserves every occurrence and requires affirmative permission to include already-true conditions',t=>{
-  const f=rig(t);
-  assert.throws(()=>f.add(notify,{...failure,repeat:'once'}));
-  assert.throws(()=>f.add('每个工作日上午九点提醒我核对纸本',{trigger:'time',repeat:'once',dueAt:'2026-03-06T09:00:00Z'}));
-  assert.throws(()=>f.add('每当校对失败就通知我',{...failure,timing:'current'}));
-  assert.throws(()=>f.add('Whenever a proofreading task fails, notify me',{trigger:'task_failed',match:'proofreading',timing:'current'}));
-  f.add('下一个工作日上午九点提醒我核对纸本一次',{trigger:'time',repeat:'once',dueAt:'2026-03-06T09:00:00Z'});
-  f.add('如果当前已有纸本校对任务失败，请马上通知我',{trigger:'task_failed',match:'纸本校对',repeat:'once',timing:'current'});
+test('each trigger retains only the scopes and schedules it can enforce',t=>{
+  const f=rig(t),time={trigger:'time',dueAt:'2026-03-06T09:00:00Z',repeat:'once'};
+  for(const spec of [
+    {...failure,repeat:'daily'},{...failure,dueAt:time.dueAt},{...failure,match:42},
+    {...failure,target:'desk.code'},{...failure,remindEveryHours:2},
+    {...time,timing:'current'},{...time,repeat:'each'},{...time,taskId:'catalogue'},{...time,match:'校对'},
+    {...time,sourceTarget:'desk.code'},{...failure,sessionId:'blue'},{...failure,machine:'desk'},
+  ]){
+    assert.throws(()=>f.add(notify,spec),JSON.stringify(spec));
+  }
+  assert.equal(f.rules.cards().length,0);
+});
+
+test('sustained online notifications use a bounded interval on a recurring status rule',async t=>{
+  const f=rig(t),text='Tant que mon atelier reste connecté, un signe toutes les deux heures.';
+  const base={trigger:'agent_online',sourceTarget:'desk.code',repeat:'each',remindEveryHours:2};
+  for(const remindEveryHours of [0,169,1.5,'bad',true,[2]]){
+    assert.throws(()=>f.add(text,{...base,remindEveryHours}));
+  }
+  assert.throws(()=>f.add(text,{...base,repeat:'once'}));
+  f.add(text,base);
+  await f.tick(ms+3600000);assert.equal(f.notices().length,0);
+  await f.tick(ms+7200000);assert.equal(f.notices().length,1);
+});
+
+test('a current task rule includes existing matching receipts while a next-event rule starts at its cursor',async t=>{
+  const f=rig(t),text='Préviens-moi si cette épreuve a déjà échoué.';
+  const tasks=[{id:'paper-17',title:'épreuve',state:'failed',target:'desk.code'}];
+  const task={trigger:'task_failed',taskId:'paper-17',match:'épreuve',repeat:'once'};
+  f.add(text,{...task,timing:'current'},{tasks});
+  f.add('Et lors du prochain incident sur cette épreuve.',{...task,timing:'next'},{tasks});
+  await f.tick(ms+3000);
+  assert.equal(f.notices().length,1);
+  assert.match(f.notices()[0],/paper-17/);
 });

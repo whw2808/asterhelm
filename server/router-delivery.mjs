@@ -129,7 +129,7 @@ export async function deliverWork(agent){
     const coverage=reviewCoverage(criteria,output.coverage,results,scopeReceipts);
     const missing=coverage.filter(r=>!r.answered);
     const follow=output.actions?.length===1?output.actions[0]:null;
-    const needsUser=ongoing&&(output.awaitingUser===true||/(?:^|[。！？\n])\s*(?:请你|需要你|等待你)(?:批准|授权|确认|决定|提供)|(?:^|[.!?]\s+)(?:please (?:approve|authorize)|waiting for your (?:approval|decision))/iu.test(output.reply||''));
+    const needsUser=ongoing&&output.awaitingUser===true;
     if(missing.length&&!needsUser&&canConsult&&['consult','dispatch'].includes(follow?.type)){
       const mode=follow.write===true?'workspace-write':'read-only';
       const worker=eligible.find(w=>w.target===follow.target&&w.modes.includes(mode));

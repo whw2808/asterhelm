@@ -181,7 +181,7 @@ To exercise setup and enrollment on a development machine, run `node --test scri
 
 ### Check the coordinator’s token usage
 
-Open **看板 → Token 用量** or ask “星舵今天用了多少 token？” in the paired chat. The service counts model calls for conversation planning, delivery, autonomous work checks and scheduled reviews. The reporting day starts at midnight in the coordinator host’s local time zone. Reading the meter uses the local SQLite ledger and makes no model request.
+Open **看板 → Token 用量** or ask “星舵今天用了多少 token？” in the paired chat. The service counts model calls for conversation planning, delivery, autonomous work checks and scheduled reviews. The reporting day starts at midnight in the coordinator host’s local time zone. The dashboard reads the local SQLite ledger directly. A natural-language chat query uses the planner to identify the request, then reads the same ledger. The chat phase also includes independent authorization checks for proposed actions.
 
 Counting begins when the upgraded coordinator starts. Existing chat history and worker receipts contain no reliable token totals for earlier use. The ledger stores call time, phase, model when available and token counts. It uses provider-reported usage, includes cached input once within input, and flags missing or partial reports. For DeepSeek Harness, the headless CLI must advertise `--json` and report usage in its `step_end` events to populate the meter. Plaintext-only versions can still answer and their calls appear as unreported. Worker inference and independent desktop conversations fall outside this meter. Pairing and chat history carry over when upgrading the server and installed Android client.
 
@@ -226,6 +226,8 @@ A strictly passive note uses a separate client capability. In the tested stock C
 Clients that implement passive notes can configure `codexContinuity.socketPath` and `codexContinuity.noteWriter` in the worker's private configuration. The socket must be the public App Server Unix endpoint serving that native client. The local executable receives one JSON object on stdin with `operation: "putIfIdle"`, `socketPath`, `threadId`, `deliveryId` and `text`. It must atomically append one idempotent, model-visible and user-visible note to that idle original thread and return `{turnId,itemId}`. Asterhelm independently reads the matching visible thread item before acknowledging delivery. This release includes the verifier and connector contract. A compatible native note writer for stock Codex Desktop is not included.
 
 ### 主聊天的主动跟进
+
+自然语言登记跟进、开关推送、批准候选事项或更改规则，需要配置聊天模型。离线模式仍可使用原卡片上的按钮，也可在主聊天查看已记录的目标预览、Agent 动态和用量。
 
 可以对星舵说“每次目录校对任务失败都提醒我”，也可以明确指定由哪个设备的 Agent 做只读复核。规则登记后，原消息带有条件、最近一次结果和控制按钮。日历规则使用登记时的时区。主机在线时手机可以离线；主机重启后会补读任务回执。会话活动和设备在线状态只能从已观测到的快照判断。
 

@@ -15,10 +15,10 @@ export function checkedRevision(action, activeWork) {
     criteria:action.criteria.map(c=>c.trim()),pauseStepIds:[...paused],evidence:action.evidence};
 }
 
-export async function withdrawPausedSteps(agent,parent) {
+export async function withdrawPausedSteps(agent,parent,{wholeOrder=false}={}) {
   const {store,broker}=agent,work=store.work;
   for(const step of work.evidence(parent)){
-    if(step.scope!=='paused'||step.finishedAt)continue;
+    if(step.finishedAt||!wholeOrder&&step.scope!=='paused')continue;
     let stopped;
     if(step.taskId){
       stopped=await broker('/cancel',{id:step.taskId});

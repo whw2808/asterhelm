@@ -16,13 +16,9 @@ export function subjectConflict(plan,snap){
   const goal=snap.follow?.candidates.find(g=>g.id===a.goalId);
   if(!goal)return true;
   if(a.title&&(!bounded(a.title,140)||normalized(a.title)!==normalized(goal.title)))return true;
-  // An existing card cannot adopt another subject merely because it is the
-  // only candidate. Require a name, a bound source, or a conversational link.
-  const linked=snap.follow.focus?.id===goal.id||sameSource(a.source,goal.subjectSource)||
-    goal.scopes.some(s=>sameSource(s,a.source));
-  if(linked)return false;
-  const names=[snap.currentUser,snap.follow.pending?.request,...(snap.history??[]).filter(m=>m.role==='user').slice(-2).map(m=>m.text)];
-  return !names.some(name=>name&&normalized(name).includes(normalized(goal.title)));
+  // A session-bound goal cannot move to a different session. The planner
+  // and reviewer resolve ordinary names and descriptions of the same subject.
+  return Boolean(a.source&&goal.scopes.length&&!goal.scopes.some(s=>sameSource(s,a.source)));
 }
 
 export class FollowRouting{
@@ -36,7 +32,9 @@ export class FollowRouting{
     const db=this.store.db;
     const row=db.prepare(`SELECT d.*,m.text AS request FROM follow_dialogue d JOIN messages m ON m.id=d.requestId AND m.role='user'
       WHERE d.scope=? AND NOT EXISTS(SELECT 1 FROM memory_exclusions WHERE id IN (d.requestId,d.lastTurn))`).get(scope);
-    const candidates=db.prepare(`SELECT id,status,version,spec FROM follow_goals WHERE status IN ('preview','enabled','paused')
+    const candidates=db.prepare(`SELECT id,status,version,spec FROM follow_goals g WHERE status IN ('preview','enabled','paused')
+      AND NOT EXISTS(SELECT 1 FROM memory_exclusions WHERE id=g.messageId)
+      AND NOT EXISTS(SELECT 1 FROM diagnostics WHERE kind='turn' AND id=g.messageId)
       AND (untilAt IS NULL OR untilAt>?) ORDER BY rowid DESC`).all(Date.now()).map(r=>{
       const {title,terms,scopes,subjectSource}=JSON.parse(r.spec);
       return {id:r.id,status:r.status,version:r.version,title,terms,scopes,...(subjectSource?{subjectSource}:{})};
@@ -57,11 +55,13 @@ export class FollowRouting{
           .run(scope,pending?.requestId??turn.id,turn.id,goalId,question);
       };
       const ask=(question=fallback)=>{
-        if(pending||hasFollowAction(proposal))remember(null,question);
         this.store.finish(turn,question);
         return {};
       };
-      if(actions.length!==1)return ask(pending?.question);
+      if(actions.length!==1||proposal.workControl){
+        this.store.finish(turn,pending?.question||fallback);
+        return {};
+      }
       const [a]=actions;
       if(!a||!bounded(a.evidence,16000)||!turn.text.includes(a.evidence))return ask(pending?.question);
       if(a.type==='dismiss_follow'&&pending&&Object.keys(a).every(k=>['type','evidence'].includes(k))){
@@ -72,14 +72,20 @@ export class FollowRouting{
       if(a.type==='pause_follow'&&Object.keys(a).every(k=>['type','goalId','evidence'].includes(k))){
         const goal=snap.follow.candidates.find(c=>c.id===a.goalId);
         const current=goal&&this.goals.get(goal.id);
-        if(!current||goal.version!==current.version||!current.actions.some(item=>item.decision==='pause'))return ask();
+        if(!current||goal.version!==current.version||!current.actions.some(item=>item.decision==='pause')||
+          (!selected&&!snap.cards?.some(c=>c.id===goal.id&&c.version===goal.version))){
+          this.store.finish(turn,'目标状态已变化，请查看最新卡片。');return {};
+        }
         this.goals.decide(turn,{id:goal.id,version:goal.version,decision:'pause'});
         this.clear(scope);
         this.store.finish(turn,'已暂停跟进「'+goal.title+'」。');
         return {};
       }
       if(a.type!=='follow_goal'||Object.keys(a).some(k=>!fields.has(k)))return ask(pending?.question);
-      if(a.question)return ask(bounded(a.question,220)?a.question:fallback);
+      if(Object.hasOwn(a,'question')){
+        if(!bounded(a.question,220)||Object.keys(a).some(k=>!['type','evidence','question'].includes(k)))return ask();
+        remember(null,a.question);return ask(a.question);
+      }
       if(subjectConflict(proposal,snap))return ask();
       const matches=snap.follow.candidates.filter(c=>a.goalId?c.id===a.goalId:
         bounded(a.title,140)&&normalized(c.title)===normalized(a.title));
@@ -97,12 +103,6 @@ export class FollowRouting{
       }
       const title=known?.title??a.title??source?.title;
       if(!bounded(title,140))return ask();
-      // A registered goal or session supplies its own identity. For a new
-      // unindexed topic require a name from the user's request, not model prose.
-      const evidence=[turn.text,pending?.request,source?.title,source?.summary,known?.title,
-        ...(source?.evidence??[]).map(e=>e.text),...(snap.history??[]).filter(m=>m.role==='user').slice(-3).map(m=>m.text)].filter(Boolean);
-      const contains=word=>evidence.some(line=>line.toLocaleLowerCase().includes(word.toLocaleLowerCase()));
-      if(!known&&!contains(title))return ask();
       const terms=a.terms??[];
       if(!Array.isArray(terms)||terms.length>10||terms.some(t=>!bounded(t,100)))return ask();
       const signals=a.signals??[];
@@ -110,7 +110,7 @@ export class FollowRouting{
       if(a.until!=null&&(!bounded(a.until,50)||!/(Z|[+-]\d\d:\d\d)$/iu.test(a.until)||!(Date.parse(a.until)>Date.now())))return ask();
       const ref=source?{machine:source.machine,id:source.id,target:source.target}:null;
       const qualifiers=(pending||known&&snap.follow.focus?.id===known.id)&&source?sourceTerms(turn.text,source):[];
-      const spec={title,terms:[...new Set([title,...terms.filter(contains),...qualifiers])],signals,until:a.until??null,
+      const spec={title,terms:[...new Set([title,...terms,...qualifiers])],signals,until:a.until??null,
         scopes:selected?[ref]:[],...(ref?{subjectSource:ref}:{})};
       const card=known?this.goals.refine(turn,known,spec):this.goals.register(turn,spec);
       remember(card.id,null);

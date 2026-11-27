@@ -4,10 +4,17 @@ import {actor} from './router-policy.mjs';
 const activeStates=new Set(['queued','running','offline']);
 const limitSeconds=value=>Math.max(30,Math.min(86400,Math.round(Number(value)||300)));
 const hash=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
-const directive=/^(?:(?:请你|请|帮我|请帮我)\s*)?(?:持续|一直|继续不断地)(?:推进|核对|检查|整理|校对|处理|工作|执行|跟进)[^？?]*(?:(?:直到|直至)([^。！？?]+)|[，,]([^。！？?]+为止))/u;
-const englishDirective=/^(?:please\s+)?(?:keep (?:working|checking|reviewing|processing|verifying)|continue (?:working|checking|reviewing|processing|verifying)|work on|persist with)\b[^?]*?\buntil\s+([^?.!]+)/iu;
-const humanHold=/(?:等我(?:确认|继续|决定|批准|回复)|wait for (?:me|my (?:approval|decision|confirmation)))/iu;
 const fingerprint=(order,steps)=>JSON.stringify([order.revision,steps.map(s=>[s.id,s.state,s.scope])]);
+
+export function checkedWorkControl(control,currentUser){
+  if(control==null)return undefined;
+  const evidence=typeof control.evidence==='string'?control.evidence.trim():'';
+  if(!evidence||!currentUser.includes(evidence))throw Error('持续工作控制缺少本轮用户原话');
+  if(control.mode==='pause')return {mode:'pause',evidence};
+  const stopCondition=typeof control.stopCondition==='string'?control.stopCondition.trim():'';
+  if(control.mode!=='until'||!stopCondition||stopCondition.length>480)throw Error('持续工作需要有效的停止条件');
+  return {mode:'until',evidence,stopCondition};
+}
 
 export class WorkWake {
   constructor(store){
@@ -18,34 +25,40 @@ export class WorkWake {
       CREATE TABLE IF NOT EXISTS ongoing_work(parent TEXT PRIMARY KEY,origin TEXT NOT NULL,instruction TEXT NOT NULL,stopCondition TEXT NOT NULL,
         timeZone TEXT NOT NULL,scopeRevision INTEGER NOT NULL,desktopSince INTEGER NOT NULL,lastFacts TEXT,lastRound INTEGER,lastAt INTEGER,delaySeconds INTEGER NOT NULL DEFAULT 0);`);
   }
-  registerGoal(turn,parent){
+  registerGoal(turn,parent,proposedControl){
     const {db,work,continuity}=this.store;
-    const source=db.prepare("SELECT text FROM messages WHERE id=? AND role='user'").get(turn.id);
-    const order=work.order(parent);if(!source||!order)return;
-    const text=source.text.trim(),prior=this.goal(parent),criteria=JSON.parse(order.criteria);
-    const updated=prior&&order.revision!==prior.scopeRevision&&db.prepare('SELECT 1 FROM work_revisions WHERE parent=? AND turnId=? AND revision=?')
-      .get(parent,turn.id,order.revision);
+    const source=db.prepare("SELECT seq,text FROM messages WHERE id=? AND role='user'").get(turn.id);
+    const order=work.order(parent);
+    if(!source||!order||!['working','synthesizing','paused'].includes(order.state))return;
+    const prior=this.goal(parent);
+    const control=checkedWorkControl(proposedControl,source.text);
+    const startsGoal=control?.mode==='until'&&prior?.origin!==turn.id;
+    if(!startsGoal&&(!prior||order.revision===prior.scopeRevision))return;
+    const revision=db.prepare(`SELECT r.turnId,m.seq FROM work_revisions r JOIN messages m ON m.id=r.turnId
+      WHERE r.parent=? AND r.revision=?`).get(parent,order.revision);
+    const revisedHere=revision?.turnId===turn.id;
+    if((revision&&source.seq<revision.seq)||(!revisedHere&&parent!==turn.id&&continuity.workForTurn(turn.id)!==parent))return;
+    const previousOrigin=prior&&db.prepare('SELECT seq FROM messages WHERE id=?').get(prior.origin);
+    if(previousOrigin&&source.seq<previousOrigin.seq)return;
+    const updated=revisedHere&&prior&&order.revision!==prior.scopeRevision;
+    if(!updated&&!startsGoal)return;
+    const criteria=JSON.parse(order.criteria);
     const desktopSince=db.prepare('SELECT coalesce(max(seq),0) last FROM continuity_events WHERE workId=?').get(parent).last;
-    // The latest authenticated amendment owns the acceptance criteria. Material
-    // from a desktop before this revision cannot establish the new stop condition.
+    // Evidence from before an accepted revision cannot establish the revised criteria.
     if(updated){
       db.prepare('UPDATE ongoing_work SET stopCondition=?,scopeRevision=?,desktopSince=?,lastFacts=NULL,lastRound=NULL,delaySeconds=0 WHERE parent=?')
         .run(criteria.join('；'),order.revision,desktopSince,parent);
-      if(humanHold.test(text)&&!/(?:另一|其他|其余|纸本|电子).{0,12}继续|(?:except|another|keep the other)/iu.test(text))work.setState(parent,'paused');
+      if(control?.mode==='pause')work.setState(parent,'paused');
     }
-    // Only direct instructions extend the ordinary follow-up budget. The user
-    // can still quote an artifact's name within such an instruction.
-    if(/(?:^|\n)\s*>|[？?]|只是(?:引用|举例)|不要(?:持续|执行)|仅(?:解释|举例)|do not (?:execute|run)/iu.test(text))return;
-    const match=directive.exec(text)||englishDirective.exec(text);
-    if(!match||humanHold.test(text)||prior?.origin===turn.id)return;
-    const stop=(match[1]||match[2]).trim();
+    if(!startsGoal)return;
+    const stop=control.stopCondition;
     if(!criteria.includes(stop))db.prepare('UPDATE work_orders SET criteria=? WHERE id=?').run(JSON.stringify([...criteria,stop]),parent);
     db.prepare(`INSERT INTO ongoing_work(parent,origin,instruction,stopCondition,timeZone,scopeRevision,desktopSince) VALUES(?,?,?,?,?,?,?)
       ON CONFLICT(parent) DO UPDATE SET origin=excluded.origin,instruction=excluded.instruction,stopCondition=excluded.stopCondition,
       scopeRevision=excluded.scopeRevision,desktopSince=excluded.desktopSince,lastFacts=NULL,lastRound=NULL,delaySeconds=0`)
-      .run(parent,turn.id,text,stop,Intl.DateTimeFormat().resolvedOptions().timeZone,order.revision,desktopSince);
+      .run(parent,turn.id,source.text,stop,Intl.DateTimeFormat().resolvedOptions().timeZone,order.revision,desktopSince);
     continuity.recordPhoneTurn(parent,db.prepare('SELECT text FROM messages WHERE id=?').get(parent).text,parent);
-    continuity.recordPhoneTurn(turn.id,text,parent);
+    continuity.recordPhoneTurn(turn.id,source.text,parent);
   }
   goal(parent){return this.store.db.prepare('SELECT * FROM ongoing_work WHERE parent=?').get(parent);}
   desktopResults(parent,steps){

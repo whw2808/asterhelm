@@ -1,7 +1,7 @@
-import {workspaceDecision} from './dispatch-authorization.mjs';
+import {assessRoute,routeDecision} from './dispatch-authorization.mjs';
 import {FollowRouting,subjectConflict} from './follow-routing.mjs';
 import {FollowGoals} from './follow-goals.mjs';
-import {followIntent,resolveGoalChoice} from './follow-chat.mjs';
+import {offlineQuery} from './follow-chat.mjs';
 import {agentActivity} from './agent-evidence.mjs';
 import {WorkReadTickets} from './work-read-tickets.mjs';
 import {desktopBackfill,desktopHasBackfill} from './desktop-backfill.mjs';
@@ -10,7 +10,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {projectAliasesFor} from './registry.mjs';
-import {actor,mentions,forbidDelegation,requireConsult} from './router-policy.mjs';
+import {actor,routeHints} from './router-policy.mjs';
 import {deliverWork} from './router-delivery.mjs';
 import {checkedRevision,acceptRevision,withdrawPausedSteps} from './work-steering.mjs';
 import {PersonalStore} from './personal-store.mjs';
@@ -19,20 +19,16 @@ import {findSharedWork} from './personal-opportunities.mjs';
 import {Flows} from './personal-flows.mjs';
 import {ProactiveCandidates} from './proactive-candidates.mjs';
 import {WakeRules} from './wake-rules.mjs';
-import {WorkWake} from './work-wake.mjs';
-import {cardChoice} from './proactive-chat.mjs';
-import {TokenUsage,isUsageQuestion,usageAnswer} from './token-usage.mjs';
+import {WorkWake,checkedWorkControl} from './work-wake.mjs';
+import {nativeCardChoice} from './proactive-chat.mjs';
+import {ChatCardVersions,currentCard,applyCardDecision} from './chat-card-routing.mjs';
+import {TokenUsage,usageAnswer} from './token-usage.mjs';
 import {selectPlanner} from './personal-model.mjs';
 import {home,call} from './control.mjs';
 
 const terminal=new Set(['succeeded','failed','interrupted','cancelled']);
 
-const noChanges=/只读|只解释|只回答|只告诉|仅解释|先别做|不要(?:执行|修改|写入|改动|派单|运行|操作)|无需(?:操作|修改)|do not (?:edit|change|write|run|dispatch)|read[ -]only|explain only/i;
 const clean=(s,n)=>typeof s==='string'?s.trim().slice(0,n):'';
-function needsStandingRule(text){
-  return /每次|每当|每个?工作日|每天|每周|whenever|every (?:time|weekday|day|week)/iu.test(text)&&
-    /提醒我|通知我|告诉我|向我汇报|派.{0,25}(?:复核|查证)|(?:notify|remind|alert) me/iu.test(text);
-}
 const specific=(rows,id)=>rows.find(row=>row.id===id);
 const optional=async(fn,fallback)=>{try{return await fn();}catch{return fallback;}};
 function compact(row){return {machine:row.machine,target:row.target??null,id:row.id,title:clean(row.title,140),summary:clean(row.summary,720),cwd:clean(row.cwd,230),updatedAt:row.updatedAt,status:row.status,visibility:row.visibility,source:row.source,evidence:(row.evidence||[]).slice(-3).map(e=>({role:e.role,text:clean(e.text,460),at:e.at,turnId:e.turnId,itemId:e.itemId}))};}
@@ -55,6 +51,7 @@ export class PersonalAgent{
     this.candidates=new ProactiveCandidates(store);this.rules=new WakeRules(store);this.workWake=new WorkWake(store);
     this.goals=new FollowGoals(store);
     this.follow=new FollowRouting(store,this.goals);
+    this.cardVersions=new ChatCardVersions(store.db);
     this.observedRows=[];this.rowsAvailable=false;
     this.processing=false;this.checking=false;this.lastObservation=0;
   }
@@ -92,116 +89,89 @@ export class PersonalAgent{
     ]);
     this.goals.observe({rows:merge([...index,...extra.flat()]),workers,tasks:this.evidenceTasks(this.store.visibleTasks(tasks)),coverage,now,onlyId});
   }
-  enrollGoal(turn,spec){
-    const card=this.goals.register(turn,spec);
-    if(card.messageId!==turn.id){
-      const state=card.status==='enabled'?'已开启提醒':'仅预览';
-      return '「'+card.title+'」已在原目标卡持续跟进（'+state+'）。';
-    }
-    const scope=spec.scopes?.length?'所选会话':'各设备已同步、与目标匹配的记录';
-    return '已关注「'+card.title+'」。我会从'+scope+'更新这条目标消息上的预览，开启推送由你确认。';
-  }
-  async receiveGoal(input,intent){
-    const selected=input.context?await this.exactSession(input.context):null;
-    if(input.context&&!selected?.target)throw Error('当前索引里找不到已注册的所选会话');
-    const respond=(fn)=>this.store.receive(input,selected,turn=>{
-      this.store.finish(turn,fn(turn),false);
-      return {id:turn.id};
-    },{linkWork:false});
-    if(intent.kind==='clarify')return respond(()=>intent.message);
-    if(intent.kind==='hold')return respond(()=>'收到，这次没有开启目标推送。');
-    if(intent.kind==='reference'){
-      if(selected){
-        const spec={title:selected.title,terms:[selected.title],scopes:[{machine:selected.machine,id:selected.id,target:selected.target}]};
-        const result=respond(turn=>this.enrollGoal(turn,spec));await this.refreshGoals();return result;
-      }
-      if(this.planner?.offline)return respond(()=>'想跟进刚才提到的哪项工作？告诉我名称，就能从原聊天开始预览。');
-      return this.store.receive(input,null,null,{linkWork:false});
-    }
-    if(intent.kind==='register'){
-      if(selected)intent.spec.scopes=[{machine:selected.machine,id:selected.id,target:selected.target}];
-      const result=respond(turn=>this.enrollGoal(turn,intent.spec));
-      await this.refreshGoals();
-      return result;
-    }
-    if(intent.kind==='decision'){
-      if(selected||input.workId)return respond(()=>'请回到主聊天的目标卡，选择要更新的目标。');
-      return respond(turn=>{
-        const choice=resolveGoalChoice(intent,intent.id?[]:this.goals.cards());
-        if(choice.error)return choice.error;
-        try{return this.goals.decide(turn,choice).detail;}
-        catch(err){return err.message;}
-      });
-    }
-    if(selected||input.workId)return respond(()=>'目标总览在主聊天里查看。当前会话的进展可从看板的 Agent 卡查看。');
-    if(intent.kind==='activity'){
+  async chatQuery(query,{id,title,goalIds,refresh=true}={}){
+    if(query==='usage')return usageAnswer(this.usage.summary());
+    if(query==='activity'){
       const {machines}=await this.board({layout:'machines'});
       const lines=machines.flatMap(m=>m.agents.map(a=>m.name+' / '+a.name+' · '+(a.activity?describeFact(a.activity):'暂无可归属的记录')));
-      return respond(()=>lines.join('\n')||'还没有已注册的 Agent。');
+      return lines.join('\n')||'还没有已注册的 Agent。';
     }
-    await this.refreshGoals();
-    return respond(()=>{
-      const cards=this.goals.cards().filter(c=>c.status!=='stopped'&&(!intent.title||c.title===intent.title));
-      if(!cards.length)return '当前没有关注中的目标。可以直接告诉我“帮我关注……”和目标名称。';
-      return cards.map(c=>{
-        const notices=c.findings.filter(f=>f.wouldNotify);
-        const latest=notices.length?notices:c.findings;
-        return ['「'+c.title+'」 · '+({preview:'仅预览',enabled:'推送已开启',paused:'跟进已暂停'}[c.status]??c.status),
-          ...(intent.recheck?['已按原始来源重新核对。查询任务的完成回执只证明查证结束。']:[]),
-          notices.length?'符合提醒条件的依据：':'当前没有符合提醒条件的新依据。',
-          ...latest.slice(0,3).map(f=>f.deviceName+' / '+f.agentName+' · '+describeFact(f))].join('\n');
-      }).join('\n\n');
+    if(refresh)await this.refreshGoals(null,null,Date.now(),id);
+    const cards=this.goals.cards().filter(c=>c.status!=='stopped'&&(!id||c.id===id)&&(!title||c.title===title)&&(!goalIds||goalIds.has(c.id)));
+    if(!cards.length)return '当前没有关注中的目标。可以直接告诉我“帮我关注……”和目标名称。';
+    return cards.map(c=>{
+      const notices=c.findings.filter(f=>f.wouldNotify);
+      const latest=notices.length?notices:c.findings;
+      return ['「'+c.title+'」 · '+({preview:'仅预览',enabled:'推送已开启',paused:'跟进已暂停'}[c.status]??c.status),
+        notices.length?'符合提醒条件的依据：':'当前没有符合提醒条件的新依据。',
+        ...latest.slice(0,3).map(f=>f.deviceName+' / '+f.agentName+' · '+describeFact(f))].join('\n');
+    }).join('\n\n');
+  }
+  async handleChatCard(turn,proposed,snap){
+    const finish=message=>this.store.transact(()=>this.store.finish(turn,message));
+    const [a]=proposed.actions;
+    if(snap.work||snap.attachedSession)return finish('请回到主聊天查看或操作这张卡。');
+    if(proposed.workControl||proposed.actions.length!==1||typeof a?.evidence!=='string'||!a.evidence.trim()||!turn.text.includes(a.evidence))
+      return finish('请单独指定要查看的内容或要操作的卡片。');
+    if(a.type==='chat_query'){
+      const goals=new Set(snap.cards.filter(c=>c.kind==='goal').map(c=>c.id));
+      if(!['goals','activity','usage'].includes(a.query)||!Object.keys(a).every(k=>['type','evidence','query','id'].includes(k))||
+        (a.id!==undefined&&(a.query!=='goals'||!goals.has(a.id))))return finish('请指定要查看的目标或总览。');
+      return finish(await this.chatQuery(a.query,{id:a.id,goalIds:goals}));
+    }
+    const offered=snap.cards.find(c=>c.id===a.id&&c.version===a.version&&c.decisions.includes(a.decision));
+    if(!offered||a.type!=='card_decision'||!Object.keys(a).every(k=>['type','evidence','decision','version','id'].includes(k)))
+      return finish('卡片状态已变化或无法确定，请查看最新卡片。');
+    this.store.transact(()=>{
+      try{
+        const stillOffered=this.cardVersions.offered.all(Date.now(),turn.id).some(c=>c.id===a.id&&c.version===a.version);
+        if(!stillOffered)throw Error('卡片状态已变化，请查看最新卡片。');
+        applyCardDecision(this,turn,a,currentCard(this,a.id),snap.wakeCursor);
+      }catch(e){this.store.finish(turn,e.message);}
     });
   }
   async receive(input){
-    const command=typeof input.text==='string'?/^星舵操作 ([\w:-]+) /u.exec(input.text.trim()):null;
-    const titles=typeof input.text==='string'&&/进度|进展|推送|提醒我什么|做到哪一步|目标预览/u.test(input.text)?this.goals.activeSpecs().map(s=>s.title):[];
-    const intent=followIntent(input.text,{goalIds:command&&this.goals.get(command[1])?[command[1]]:[],titles,offlineEnrollment:!!this.planner?.offline});
-    if(intent)return this.receiveGoal(input,intent);
-    if(isUsageQuestion(input.text)){
-      // Account-wide totals belong to the paired user's chat. This query also works offline.
-      return this.store.receive({...input,context:null,workId:null},null,turn=>{
-        this.store.finish(turn,usageAnswer(this.usage.summary()));
-        return {id:turn.id};
-      });
-    }
-    const inspect=typeof input.text==='string'&&/^(?:星舵操作|可以|同意|好|批准|立项|把这件事|开始这件工作|忽略|再查|再核对|暂停|恢复|取消|停止)/.test(input.text.trim());
-    const cards=inspect?[...this.candidates.cards(),...this.rules.cards()]:[];
-    const recent=this.store.db.prepare('SELECT id FROM messages ORDER BY seq DESC LIMIT 1').get();
-    const choice=typeof input.text==='string'?cardChoice(input.text,cards,recent?.id):null;
+    if(typeof input.requestId==='string'&&this.store.db.prepare('SELECT 1 FROM turns WHERE requestId=?').get(input.requestId))
+      return this.store.receive(input);
+    const choice=nativeCardChoice(input.text);
     if(choice){
       const cursor=choice.decision==='resume'?await optional(()=>this.broker('/wakeEvents',{after:null}),null):null;
-      return this.store.receive({...input,context:null,workId:null},null,turn=>{
+      return this.store.receive(input,null,turn=>{
         try{
-          if(choice.error)throw Error(choice.error);
-          const card=cards.find(c=>c.id===choice.id);
-          if(!card)throw Error('未找到这张卡，请查看最新消息。');
-          if(input.context&&(!card.workId||!this.store.continuity.participants(card.workId).some(p=>p.machine===input.context.machine&&p.id===input.context.id)))
-            throw Error('请在该事项的卡片上确认。');
-          if(card.kind==='candidate')return this.candidates.decide(turn,choice);
-          const updated=this.rules.decide(turn,{...choice,cursor:cursor?.cursor});
-          this.store.finish(turn,'规则已'+({pause:'暂停',resume:'恢复',cancel:'取消'}[choice.decision]||'更新')+'。');
-          return {id:turn.id,...(updated?.workId?{workId:updated.workId}:{})};
+          const card=currentCard(this,choice.id);
+          if(input.context&&(!card?.workId||input.workId&&input.workId!==card.workId||
+            !this.store.continuity.participants(card.workId).some(p=>p.machine===input.context.machine&&p.id===input.context.id)))
+            throw Error('请在该事项的主聊天卡片上确认。');
+          return applyCardDecision(this,turn,choice,card,cursor?.cursor);
         }catch(e){this.store.finish(turn,e.message);return {id:turn.id};}
-      });
+      },{linkWork:false});
     }
-    if(this.planner?.offline)throw Error('聊天模型尚未启用。请在服务器配置模型并重启助手。');
+    if(this.planner?.offline){
+      const lookup=offlineQuery(input.text,this.goals.activeSpecs().map(g=>g.title));
+      if(!lookup)throw Error('自然语言操作需要聊天模型。请启用模型，或使用已有卡片上的按钮。');
+      const answer=input.context?'请回到主聊天查看总览。':await this.chatQuery(lookup.query,{title:lookup.title,refresh:false});
+      return this.store.receive(input,null,turn=>{this.store.finish(turn,answer);return {id:turn.id};},{linkWork:false});
+    }
     const row=input.context?await this.exactSession(input.context):null;
     if(input.context&&!row)throw Error('当前索引里找不到所选会话');
-    const bindingOnly=input.workId&&row&&/^(?:(?:关联|绑定|加入|连接)(?:到)?(?:这项|本项|当前)工作(?:[，, ]*(?:仅|只)?接收(?:更新|摘要))?|(?:link|join) (?:this|the) work(?: item)?(?: to receive updates)?)[。.!！]?$/iu.test(input.text.trim());
-    if(bindingOnly)return this.store.receive(input,row,turn=>{
-      this.store.finish(turn,'已关联这段桌面会话。工作更新会送到原窗口，等你说“继续”再执行。');
-      return {id:turn.id,workId:this.store.continuity.workForTurn(turn.id)};
-    });
-    if(row&&!input.workId){
+    const alreadyJoined=row&&input.workId&&this.store.continuity.participants(input.workId)
+      .some(p=>p.machine===row.machine&&p.id===row.id&&p.target===(row.target??''));
+    if(row&&!alreadyJoined){
       // A board selection normally binds its desktop thread on receipt. Resolve
       // observation-only requests before that binding can create a work identity.
-      if(this.store.db.prepare('SELECT 1 FROM turns WHERE requestId=?').get(input.requestId))
-        return this.store.receive(input,row);
       const scope=JSON.stringify([row.machine,row.id]);
-      const snap={phase:'selectedFollow',currentUser:input.text,sessions:[compact(row)],follow:this.follow.context(scope)};
+      const attachedSession={machine:row.machine,id:row.id,target:row.target,title:row.title,found:true};
+      const snap={phase:'selectedFollow',currentUser:input.text,attachedSession,sessions:[compact(row)],follow:this.follow.context(scope)};
       const proposal=await this.followProposal(snap);
-      if(!this.leftFollow(proposal,input.text)){
+      if(proposal.workControl||!this.leftFollow(proposal,input.text)){
+        const actions=proposal.actions??[];
+        const card=actions.some(a=>['card_decision','chat_query'].includes(a?.type));
+        const effect=!proposal.workControl&&actions.length===1&&['follow_goal','pause_follow','dismiss_follow'].includes(actions[0]?.type);
+        const denied=effect?await routeDecision(this.planner,{text:input.text.trim()},snap,proposal):null;
+        if(card||denied)return this.store.receive(input,row,turn=>{
+          this.store.finish(turn,denied||'请回到主聊天查看或操作这张卡。');
+          return {id:turn.id};
+        },{linkWork:false});
         let outcome;
         const result=this.store.receive(input,row,turn=>{outcome=this.follow.handle(turn,proposal,snap,{scope,selected:row});},{linkWork:false});
         if(outcome?.previewId)await this.refreshGoals(null,null,Date.now(),outcome.previewId);
@@ -212,7 +182,8 @@ export class PersonalAgent{
         return {id:turn.id,workId:this.store.continuity.workForTurn(turn.id)};
       });
     }
-    return this.store.receive(input,row);
+    if(row)return this.store.receive(input,row);
+    return this.store.receive(input,null,turn=>this.cardVersions.capture(turn));
   }
   async exactSession({machine,id}){
     if(typeof machine!=='string'||typeof id!=='string')return null;
@@ -287,10 +258,7 @@ export class PersonalAgent{
     const workers=snap.workers||[];
     const registered=target=>workers.find(w=>w.target===target&&w.deviceId);
     const criteria=Array.isArray(plan.criteria)?plan.criteria.filter(x=>typeof x==='string'&&x.trim()).slice(0,6).map(x=>clean(x,480)):[];
-    if(!criteria.length){
-      criteria.push(turn.text);
-      if(/对比|比较|区别|差异|\bcompare\b/i.test(turn.text))criteria.push('对比双方各自的依据与关键差异','结合用户的目标说明可沿用的做法、具体改动和仍待验证之处');
-    }
+    if(!criteria.length)criteria.push(turn.text);
     const refs=(snap.attachedSession?.found?[snap.attachedSession,...(plan.references||[])]:plan.references||[]).map(r=>snap.sessions.find(s=>r?.id===s.id&&r.machine===s.machine)).filter(Boolean);
     const actions=[];
     const edits=plan.actions.filter(a=>a?.type==='revise');
@@ -302,7 +270,7 @@ export class PersonalAgent{
     const revision=edits.length?checkedRevision(edits[0],snap.activeWork||[]):null;
     const scoped=revision||proposedActions.filter(a=>['dispatch','consult','handoff'].includes(a?.type)).length>1;
     for(const a of proposedActions){
-      assert(a&&typeof a==='object'&&typeof a.evidence==='string'&&a.evidence.trim().length>=2&&turn.text.includes(a.evidence),'操作缺少来自你本条消息的依据');
+      assert(a&&typeof a==='object'&&typeof a.evidence==='string'&&a.evidence.trim().length>0&&turn.text.includes(a.evidence),'操作缺少来自你本条消息的依据');
       const text=clean(a.text,1500);
       switch(a.type){
         case 'wake_rule':actions.push(this.rules.check(a,turn,snap));break;
@@ -317,7 +285,7 @@ export class PersonalAgent{
         case 'remember':{
           const key=clean(a.key,100),scope=clean(a.scope,120)||'global';
           assert(key&&text,'偏好内容不完整');
-          actions.push({type:'remember',key,scope,text});break;
+          actions.push({type:'remember',key,scope,text,restore:this.store.wasForgotten(key,scope,text)});break;
         }
         case 'forget':assert(specific(snap.preferences,a.id),'未找到这条偏好');actions.push({type:a.type,id:a.id});break;
         case 'todo':{
@@ -343,13 +311,6 @@ export class PersonalAgent{
           const write=a.type==='dispatch'&&a.write===true;
           const mode=write?'workspace-write':'read-only';
           assert(worker.capabilities?.includes(mode),'执行端没有所需能力');
-          // Write dispatches receive a separate check of the complete request
-          // and assignment. A read-only constraint can apply to the originals.
-          if(!write)assert(!forbidDelegation.test(turn.text),'当前消息要求直接解释或暂缓执行');
-          if(attached&&attached.machine!==worker.deviceId){
-            const assigned=revision&&snap.activeWork.find(order=>order.id===revision.id)?.tasks.some(s=>s.target===worker.target);
-            assert(assigned||mentions(turn.text,worker),'所选会话与执行设备不一致');
-          }
           if(attached&&attached.machine===worker.deviceId&&sourceId)assert(attached.id===sourceId,'指定会话与所选会话不一致');
           const context=row?'\n来源会话，只读资料：'+JSON.stringify(compact(row)):'';
           const objective=scoped?'\n只执行上方委派给你的分工，直接交回这一份产出与依据。其他执行端由总控协调。':
@@ -358,10 +319,8 @@ export class PersonalAgent{
             prompt:prompt+objective+context,mode,notify:a.notify===true});break;
         }
         case 'handoff':{
-          assert(!noChanges.test(turn.text)&&!forbidDelegation.test(turn.text),'当前请求没有授权跨机写入产物');
           const from=registered(a.from),to=registered(a.to);
-          assert(from?.capabilities?.includes('workspace-write')&&from.capabilities.includes('handoff')&&to?.capabilities?.includes('read-only')&&to.capabilities.includes('handoff')&&a.from!==a.to&&clean(a.first,6000)&&clean(a.second,6000),'两阶段交接需要可执行的端点和清晰目标');
-          assert(/交给|交接|接力|另一|再让|然后|核对|handoff|pass|transfer|both/i.test(turn.text),'当前要求未指定跨端接力');
+          assert(from?.capabilities?.includes('workspace-write')&&from.capabilities.includes('handoff')&&to?.capabilities?.includes('read-only')&&to.capabilities.includes('handoff')&&a.from!==a.to&&clean(a.first,6000)&&clean(a.second,6000),'两阶段交接需要清晰的产物和后续用途；from 与 to 须分别填写两个支持交接的 workers[].target。');
           actions.push({type:'handoff',from:a.from,to:a.to,firstActor:actor(from),secondActor:actor(to),first:clean(a.first,6000),second:clean(a.second,6000),notify:a.notify===true});break;
         }
         case 'review':{
@@ -373,24 +332,41 @@ export class PersonalAgent{
           const parent=snap.activeWork?.find(order=>order.id===a.id);
           const child=snap.activeWork?.find(order=>order.tasks?.some(step=>step.id===a.id||step.taskId===a.id));
           assert(!child,'部分分工调整必须使用 revise 并更新验收范围');
-          if((parent?.tasks?.filter(step=>step.scope==='active').length??0)>1){
-            assert(/整(?:项|个|单)|全部|所有|全停|\b(?:entire|whole|all|everything)\b/i.test(turn.text)&&
-              !/其他.{0,6}(?:照常|继续)|\b(?:except|keep)\b/i.test(turn.text),
-              '只有明确叫停整项工作才可以取消父任务。调整其中的分工请使用 revise，保留仍适用的步骤');
-          }
           assert(parent||(!snap.work&&(this.flows.ownedFirst(a.id)||this.store.waiting().some(x=>x.id===a.id))),'这项任务不属于当前助手或已结束');
-          actions.push({type:a.type,id:a.id});break;
+          actions.push({type:a.type,id:a.id,...(parent?{expectedRevision:parent.revision}:{})});break;
         }
         default:throw Error('模型提出了当前版本不支持的操作');
       }
     }
     const used=snap.preferences.filter(p=>(plan.usedPreferences||[]).includes(p.id)||plan.reply.includes(p.text)).map(({key,scope})=>({key,scope}));
-    return {reply:clean(plan.reply,14000),actions:this.rules.uniqueGrants(actions),criteria,used,refs:refs.map(r=>({machine:r.machine,id:r.id}))};
+    const workControl=checkedWorkControl(plan.workControl,turn.text);
+    if(workControl){
+      const delegated=actions.some(a=>['consult','dispatch','handoff'].includes(a.type));
+      assert(revision||delegated,'持续工作需要一项明确的工作');
+      if(workControl.mode==='pause'){
+        assert(revision&&!delegated&&this.workWake.goal(revision.id),'等待决定需要关联当前持续工作，暂停时不能派单');
+        // The reviewer must see every assignment that a whole-work hold will withdraw.
+        const order=snap.activeWork.find(w=>w.id===revision.id);
+        const unfinished=order.tasks.filter(s=>s.scope==='active'&&!terminal.has(s.state));
+        revision.pauseStepIds=[...new Set([...revision.pauseStepIds,...unfinished.map(s=>s.id)])];
+      }
+    }
+    return {workControl,reply:clean(plan.reply,14000),actions:this.rules.uniqueGrants(actions),criteria,used,refs:refs.map(r=>({machine:r.machine,id:r.id}))};
   }
   async apply(turn,plan){
     const results=[];
     const work=this.store.work;
     const revision=plan.actions.find(a=>a.type==='revise');
+    const cancellations=plan.actions.filter(a=>a.type==='cancel'&&(a.expectedRevision!=null||work.order(a.id)));
+    if(cancellations.length)this.store.transact(()=>{
+      for(const action of cancellations){
+        const order=work.order(action.id);
+        if(!order||action.expectedRevision!=null&&(order.revision!==action.expectedRevision||
+          !['working','synthesizing','paused','cancelled'].includes(order.state)))throw Error('工作范围已变化或工作已结束');
+        work.setState(order.id,'cancelled');
+        for(const step of work.evidence(order.id))if(step.taskId)this.flows.stopFlow(step.taskId);
+      }
+    });
     const linked=this.store.continuity.workForTurn(turn.id);
     const existing=linked&&work.order(linked);
     const parent=revision?.id||(['working','synthesizing'].includes(existing?.state)?linked:turn.id);
@@ -406,7 +382,7 @@ export class PersonalAgent{
     if(delegated||revision)this.store.transact(()=>{
       if(revision)acceptRevision(this,turn,revision);
       else if(parent===turn.id)work.create(turn,plan.criteria||[turn.text]);
-      this.workWake.registerGoal(turn,parent);
+      this.workWake.registerGoal(turn,parent,plan.workControl);
       for(const [i,a] of plan.actions.entries()){
         const key=turn.id+':'+i;
         if(a.type==='handoff'){
@@ -437,15 +413,7 @@ export class PersonalAgent{
       }else if(a.type==='cancel'){
         const parent=work.order(a.id);
         if(parent){
-          this.store.transact(()=>{
-            work.setState(a.id,'cancelled');
-            for(const s of work.evidence(a.id))if(!s.taskId)work.stopUnsubmitted(s.id,'cancelled','已取消');
-          });
-          for(const s of work.evidence(a.id)){
-            if(!s.taskId)continue;
-            if(this.flows.stopFlow(s.taskId))await this.broker('/cancelByRequestId',{requestId:'handoff:'+s.taskId});
-            if(!s.finishedAt)await this.broker('/cancel',{id:s.taskId});
-          }
+          await withdrawPausedSteps(this,a.id,{wholeOrder:true});
           this.store.ackEffect(turn.id,i,a.id);continue;
         }
         if(this.flows.stopFlow(a.id))await this.broker('/cancelByRequestId',{requestId:'handoff:'+a.id});
@@ -487,7 +455,8 @@ export class PersonalAgent{
     this.delivering=true;
     try{await deliverWork(this);}finally{this.delivering=false;}
   }
-  async followSnapshot(snap){
+  async followSnapshot(snap,turn){
+    snap.cards=this.cardVersions.snapshot(this,turn);
     snap.follow=this.follow.context();
     const subject=snap.follow.focus?.subjectSource;
     if(subject&&!snap.sessions.some(s=>s.machine===subject.machine&&s.id===subject.id&&s.visibility!=='metadata-only')){
@@ -527,8 +496,9 @@ export class PersonalAgent{
       let plan=turn.plan?JSON.parse(turn.plan):null;
       if(!plan){
         const snap=await this.snapshot(turn);
+        snap.intentHints=routeHints(turn.text,snap.workers);
         const isMain=!snap.work&&!snap.attachedSession;
-        const input=isMain?await this.followSnapshot(snap):snap;
+        const input=isMain?await this.followSnapshot(snap,turn):snap;
         let proposed=await this.followProposal(input);
         const leaving=snap.phase&&this.leftFollow(proposed,turn.text);
         if(leaving){
@@ -538,29 +508,39 @@ export class PersonalAgent{
           snap.follow={...snap.follow,pending:null,focus:null};
           proposed=await this.planner.plan(snap);
         }
-        const outcome=isMain&&this.follow.handle(turn,proposed,snap);
-        if(outcome){
-          if(outcome.previewId)await this.refreshGoals(null,null,Date.now(),outcome.previewId);
-          return;
-        }
-        const standing=needsStandingRule(turn.text);
-        const registrationMissing=proposal=>standing&&!proposal.actions?.some(a=>a.type==='wake_rule');
-        if(registrationMissing(proposed))
-          proposed=await this.planner.plan({...snap,routingCorrection:'请按原话登记重复或条件委托。无法验证条件时说明缺口，等待用户决定。'});
-        const checked=proposal=>{
-          assert(!registrationMissing(proposal),'尚未登记这条规则，请明确需要观察的条件与触发动作');
-          return this.check(turn,requireConsult(turn,snap,proposal),snap);
-        };
-        try{
-          try{plan=checked(proposed);}
-          catch(error){
-            if(!snap.activeWork?.length||!proposed.actions?.some(a=>['cancel','revise'].includes(a?.type)))throw error;
-            proposed=await this.planner.plan({...snap,routingCorrection:error.message+'。按当前消息重新识别原工作及步骤，指代仍不明确就提问。'});
-            plan=checked(proposed);
+        for(let attempt=0;attempt<2;attempt++){
+          const types=proposed.actions.map(a=>a?.type);
+          const card=types.some(t=>['chat_query','card_decision'].includes(t));
+          const follow=types.some(t=>['follow_goal','pause_follow','dismiss_follow'].includes(t));
+          if(card||follow||isMain&&(snap.follow?.pending||snap.phase==='focusedFollow')){
+            if((card||follow)&&(types.length!==1||proposed.workControl)){
+              this.store.transact(()=>this.store.finish(turn,'这次计划混合了不同操作，尚未执行。'));return;
+            }
+            if((card||follow)&&types[0]!=='chat_query'){
+              const denied=await routeDecision(this.planner,turn,snap,proposed);
+              if(denied){this.store.transact(()=>this.store.finish(turn,denied));return;}
+            }
+            if(card){await this.handleChatCard(turn,proposed,snap);return;}
+            const outcome=isMain&&this.follow.handle(turn,proposed,snap);
+            if(outcome){
+              if(outcome.previewId)await this.refreshGoals(null,null,Date.now(),outcome.previewId);
+              return;
+            }
           }
-        }catch(e){this.store.transact(()=>this.store.finish(turn,'我还没有执行这一步。'+e.message+'。请补充具体要求。'));return;}
-        const denied=await workspaceDecision(this.planner,turn,snap,plan);
-        if(denied){this.store.transact(()=>this.store.finish(turn,denied));return;}
+          try{plan=this.check(turn,proposed,snap);}
+          catch(error){
+            if(attempt===0&&types.length){
+              proposed=await this.planner.plan({...snap,routingCorrection:error.message});continue;
+            }
+            this.store.transact(()=>this.store.finish(turn,'尚未执行。'+error.message));return;
+          }
+          const review=await assessRoute(this.planner,turn,snap,plan);
+          if(!review)break;
+          if(attempt===0&&review.replan){
+            proposed=await this.planner.plan({...snap,routingCorrection:review.message});continue;
+          }
+          this.store.transact(()=>this.store.finish(turn,review.message));return;
+        }
         this.store.transact(()=>{
           if(isMain)this.follow.clear('main');
           this.store.savePlan(turn,plan);
@@ -631,7 +611,7 @@ export class PersonalAgent{
           if(terminal.has(task.state))this.store.db.prepare('UPDATE assignments SET reported=1 WHERE id=?').run(task.id);
         });
       }
-      if(this.rowsAvailable&&Array.isArray(catalog))await this.candidates.tick({rows:this.observedRows,workers,broker:this.broker});
+      if(this.rowsAvailable&&Array.isArray(catalog))await this.candidates.tick({rows:this.observedRows,workers,broker:this.broker,planner:this.planner});
       for(const watch of this.store.watchers()){
         const rows=await optional(()=>this.contextRows(watch.sessionId,4),null);
         if(!rows)continue;

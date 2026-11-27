@@ -1,3 +1,4 @@
+import {approveRoute} from './test-support/route-review.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
@@ -5,21 +6,19 @@ import {join} from 'node:path';
 import {tmpdir} from 'node:os';
 import {PersonalStore} from './personal-store.mjs';
 import {PersonalAgent} from './personal-service.mjs';
-import {requireConsult} from './router-policy.mjs';
+import {routeHints} from './router-policy.mjs';
 
 const worker={deviceId:'catalog-desk',deviceName:'Catalog Desk',platform:'Linux',deviceAliases:[],target:'catalog-desk.editor',
   agentName:'Catalog Editor',aliases:['目录编辑'],kind:'command',online:true,capabilities:['read-only'],contextSources:[]};
 const contexts={readContexts:()=>[],contextCoverage:()=>[]};
 const question='请比较两份目录配置的区别';
 const criteria=['已核实的配置差异','仍需验证的输入'];
-test('dispatcher consults original device, handles Chinese aliases, and clarifies shared platform',()=>{
+test('candidate hints preserve ambiguous devices without creating actions',()=>{
   const other={...worker,deviceId:'box-b',deviceName:'B',target:'box-b.tool',agentName:'Material',aliases:[]};
-  const snap={sessions:[],lastMentioned:[],workers:[other,worker]};
-  const direct={reply:'generic answer',actions:[],references:[]};
-  assert.equal(requireConsult({text:'请让目录编辑核对配置'},snap,direct).actions[0].target,worker.target);
-  assert.equal(requireConsult({text:'Linux 上帮我查一下配置'},snap,direct).actions.length,0);
-  assert.ok(requireConsult({text:'你好'},snap,{...direct,directBasis:'conversation'}).actions.length===0);
-  assert.equal(requireConsult({text:question},{...snap,attachedSession:{machine:worker.deviceId,id:'session'}},direct).actions[0].target,worker.target);
+  assert.deepEqual(routeHints('请让目录编辑核对配置',[worker,other]).mentionedTargets,[worker.target]);
+  const hints=routeHints('有人说 Linux 上帮我查配置',[worker,other]);
+  assert.equal(hints.mentionedTargets.length,2);
+  assert.equal(hints.actions,undefined);
 });
 test('durable parent/child cards survive restart, follow-up and duplicate receipts',async()=>{
   const tmp=mkdtempSync(join(tmpdir(),'router-round-'));
@@ -37,6 +36,7 @@ test('durable parent/child cards survive restart, follow-up and duplicate receip
     }
   };
   const planner={plan:async(input)=>{
+    if(input.phase==='routeAuthority')return approveRoute(input);
     if(input.phase!=='delivery')return {reply:'',criteria,actions:[{type:'consult',target:worker.target,title:'核实配置',prompt:'读配置',evidence:'目录配置'}]};
     const gap=input.results.length===1;
     return {reply:gap?'缺第二项':'差异来自排序设置。第二份输入尚缺分类字段，先验证分类规则。',coverage:[

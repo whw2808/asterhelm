@@ -1,53 +1,45 @@
 import {createHash} from 'node:crypto';
-import {actor,forbidDelegation} from './router-policy.mjs';
+import {actor} from './router-policy.mjs';
 import {terminalTasks} from './personal-work.mjs';
 import {nextCalendarTime} from './wake-calendar.mjs';
 
 const toISO=ms=>new Date(ms).toISOString();
 const clean=s=>typeof s==='string'?s.trim():'';
+const absent=value=>value==null||value==='';
 const digest=s=>createHash('sha256').update(s).digest('hex');
 const taskTrigger=s=>s.trigger==='task_failed'||s.trigger==='task_succeeded';
 const title={time:'到期提醒',task_failed:'任务失败',task_succeeded:'任务完成',agent_online:'执行端上线',session_changed:'会话有新活动'};
 const receiptState={succeeded:'已完成',failed:'失败',cancelled:'已取消',interrupted:'中断',running:'执行中',queued:'已入队'};
-const recurrent=/每(?:次|当|逢|个|天|日|周|星期|晚|早|小时)|一旦.+就一直|只要.+(?:每|一直)|\b(?:every|whenever|each|daily|weekly|weekdays|hourly)\b/i;
-const currentCondition=/当前|目前|现有|已有|已经|当下|如果.{0,30}已|只要.{0,30}(?:在线|仍|一直)|(?:条件|状态)(?:已)?满足(?:时|就)|\b(?:currently|already|existing|right now)\b|\bif .{0,40}\bis online\b/i;
-const notification=/提醒|通知|告诉|汇报|报告|发消息|发给我|叫我|看一次|检查|复查|\b(?:alert|notify|tell|remind|report|check|ping|message|let me know)\b/i;
-const review=/(?:派|交[给由]|让|请|委托|安排|由).{0,80}(?:只读|复核|核对|查证|复查)|\b(?:assign|send|ask|delegate|have)\b.{0,75}\b(?:verify|review|check|consult)\b/i;
-const manualStop=/(?:直到|直至|除非)我(?:明确|主动|手动)?(?:说|要求|通知你)?(?:取消|叫停|停止)(?:为止)?|\buntil I (?:cancel|stop|(?:ask|tell) you to stop)(?: (?:it|this rule))?\b/giu;
-const deadline=/直到|直至|截至|截止(?:到)?|到期日|\b(?:until|through|ending on)\b/iu;
-const calendarBound=/(?:\d{4}[-/]\d|\d{1,2}月|[一二三四五六七八九十]+月|[本这下]?周[一二三四五六日天末]|星期|今天|明天|月底|年底|\b(?:today|tomorrow|monday|tuesday|wednesday|thursday|friday|saturday|sunday|january|february|march|april|may|june|july|august|september|october|november|december)\b)/iu;
-const indirect=/(?:举例|示例|复述|翻译|是什么意思|解释这|引用|设想|假设|他说|她说|不要(?:.*提醒|.*复核)|别(?:.*提醒|.*复核)|暂不|取消|不需要|先不要|无需)|\b(?:example|suppose|imagine|said|quote|translate|explain|do not|don't|cancel|never)\b/i;
+const commonFields=['type','evidence','text','trigger','repeat','timing','effect','timeZone','endAt'];
+const taskFields=['match','taskId','sourceTarget','machine'];
+const triggerFields={
+  time:['dueAt'],task_failed:taskFields,task_succeeded:taskFields,
+  agent_online:['sourceTarget','machine','remindEveryHours'],session_changed:['machine','sessionId','sourceTarget'],
+};
 function requireThat(ok,message){if(!ok)throw Error(message);}
 function isoDate(value){
-  requireThat(typeof value==='string'&&/(?:Z|[+-]\d\d:\d\d)$/.test(value)&&Number.isFinite(Date.parse(value)),'需要含时区的有效日期');
-  return toISO(Date.parse(value));
-}
-function identifies(text,w){
-  return [w.target,w.deviceId,w.agentName,w.deviceName,...(w.aliases||[]),...(w.deviceAliases||[])].some(x=>
-    x&&text.toLowerCase().includes(x.toLowerCase()));
+  const parts=typeof value==='string'&&/^(\d{4}-\d{2}-\d{2})T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/i.exec(value);
+  const instant=parts?Date.parse(value):NaN;
+  requireThat(Number.isFinite(instant),'需要含时区的有效日期');
+  // Date.parse normalizes e.g. April 31 to May 1. Keep the specified local date exact.
+  requireThat(toISO(Date.parse(parts[1]+'T00:00:00Z')).startsWith(parts[1]),'登记日期无效');
+  return toISO(instant);
 }
 function signedUser(store,turn){
   const row=store.db.prepare("SELECT m.text,m.createdAt,t.state FROM turns t JOIN messages m ON t.id=m.id AND m.role='user' WHERE t.id=?").get(turn.id);
   requireThat(row&&(!turn.text||row.text===turn.text),'委托需要来自手机用户原消息');
   return row;
 }
-function directText(text){
-  return text.replace(/“[^”]*”|「[^」]*」|『[^』]*』|"[^"]*"|'[^']*'|`[^`]*`|^>.*$/gmu,' ');
-}
 function conditionText(s){
   if(s.trigger==='time')return '日历 · '+s.timeZone;
   return '等待'+title[s.trigger]+[s.match,s.taskId,s.sourceTarget,s.session?.id].filter(Boolean).map(x=>' · '+x).join('');
 }
-// Baselines and receipt cursors are observation state. Compare the authority
-// granted by the user, independently of when a planner proposal was checked.
-function sameAction(a,b){
-  const identity=s=>JSON.stringify([s.trigger,s.effect,s.repeat,s.timing,s.timeZone,s.endAt,s.sourceWorkId,
-    s.dueAt,s.sourceTarget,s.match?.toLowerCase(),s.taskId,s.remindEveryHours,s.session?.machine,s.session?.id,
+// Cursors, baseline samples and registration time may change on retry. Evidence
+// is part of the action: it is the message shown or sent to the reviewing agent.
+function actionKey(s){
+  return JSON.stringify([s.trigger,s.effect,s.evidence,s.repeat,s.timing,s.timeZone,s.endAt,s.sourceWorkId,s.workRevision,
+    s.dueAt,s.sourceDevice,s.sourceTarget,s.match?.toLowerCase(),s.taskId,s.remindEveryHours,s.session?.machine,s.session?.id,
     s.session?.target,s.actor?.deviceId,s.actor?.target]);
-  return identity(a)===identity(b);
-}
-function overlaps(a,b){
-  return a.grantStart<b.grantStart+b.evidence.length&&b.grantStart<a.grantStart+a.evidence.length;
 }
 function withTransaction(store,fn){return store.db.isTransaction?fn():store.transact(fn);}
 
@@ -70,90 +62,65 @@ export class WakeRules {
   check(a,turn,snap){
     const text=signedUser(this.store,turn).text;
     const evidence=clean(a.evidence);
-    const grant=directText(text).replace(manualStop,''),instruction=directText(evidence).replace(manualStop,'');
-    requireThat(evidence&&text.includes(evidence)&&instruction.trim()&&grant.includes(instruction.trim())&&!indirect.test(grant),'请直接说明要登记的条件与动作');
+    requireThat(evidence&&text.includes(evidence),'登记需要引用本条手机消息的原文');
     const repeat=a.repeat??'once',timing=a.timing??'next',effect=a.effect??'notify';
-    requireThat(Object.hasOwn(title,a.trigger)&&['current','next'].includes(timing),'缺少可以验证的触发来源');
-    requireThat(['notify','consult'].includes(effect)&&(effect==='consult'?review.test(instruction)&&!forbidDelegation.test(grant):notification.test(instruction)),'本条消息没有授权这项唤醒动作');
-    const prefix=text.slice(0,text.indexOf(evidence)).split(/[。；;！？!?\n]/u).at(-1);
-    const clause=directText(prefix)+instruction;
-    requireThat(repeat==='once'?!recurrent.test(clause):recurrent.test(instruction),'登记次数必须与原话约定的首次或每次一致');
+    requireThat(typeof a.trigger==='string'&&Object.hasOwn(triggerFields,a.trigger)&&['current','next'].includes(timing),'缺少可以验证的触发来源');
+    requireThat(['notify','consult'].includes(effect),'不支持这项唤醒动作');
+    const fields=new Set([...commonFields,...triggerFields[a.trigger]]);
+    if(effect==='consult')fields.add('target');
+    requireThat(Object.keys(a).every(key=>fields.has(key)||absent(a[key])),'触发来源不支持这些委托参数');
+    requireThat(a.timeZone==null||typeof a.timeZone==='string','需要有效的登记时区');
     const now=Date.parse(snap.now),timeZone=clean(a.timeZone)||snap.timeZone||Intl.DateTimeFormat().resolvedOptions().timeZone;
     requireThat(Number.isFinite(now),'缺少登记时间');
     new Intl.DateTimeFormat('en',{timeZone});
-    const s={type:'wake_rule',evidence,grantStart:text.indexOf(evidence),trigger:a.trigger,effect,repeat,timing,timeZone,registeredAt:toISO(now),
-      endAt:a.endAt?isoDate(a.endAt):null,sourceWorkId:this.store.continuity.workForTurn(turn.id)};
+    const s={type:'wake_rule',evidence,trigger:a.trigger,effect,repeat,timing,timeZone,registeredAt:toISO(now),
+      endAt:absent(a.endAt)?null:isoDate(a.endAt),sourceWorkId:this.store.continuity.workForTurn(turn.id)};
     if(s.endAt)requireThat(Date.parse(s.endAt)>now,'委托截止时间已过');
-    const tail=text.slice(s.grantStart+evidence.length).replace(/^[，,\s]+/u,'').split(/[。；;\n]/u)[0];
-    const stopText=instruction+(deadline.exec(tail)?.index===0?' '+directText(tail).replace(manualStop,''):'');
-    const until=deadline.exec(stopText),bounded=until||stopText.includes('为止');
-    if(bounded||s.endAt){
-      const ending=until?stopText.slice(until.index+until[0].length):stopText;
-      requireThat(bounded&&s.endAt&&calendarBound.test(ending),'需要可核对的停止条件或截止时间');
-    }
-    if(a.trigger==='time'){
-      requireThat(['once','daily','weekly','weekdays'].includes(repeat),'不支持这个日历周期');
-      requireThat(/[零一二三四五六七八九十两\d]+(?:点|时|天后|分钟后|小时后)|今晚|早上|早晨|明早|明晚|上午|中午|下午|明天|周[一二三四五六日天末]|星期|工作日|每(?:天|日|周|晚|早)|\d:\d|\b(?:tomorrow|tonight|daily|weekly|weekdays?|every (?:day|week)|at \d|in \d+ (?:days?|hours?|minutes?))\b/i.test(evidence),'消息中缺少约定时点');
+    if(s.trigger==='time'){
+      requireThat(timing==='next'&&['once','daily','weekly','weekdays'].includes(repeat),'不支持这个日历周期或时点');
       s.dueAt=isoDate(a.dueAt);
       requireThat(!s.endAt||s.dueAt<=s.endAt,'首次时点已超过截止时间');
-      if(repeat==='weekdays')requireThat(/工作日|weekday/i.test(evidence),'工作日周期需要本条消息授权');
-      if(repeat==='daily')requireThat(/每天|每日|每(?:天|晚|早|日)|\bdaily\b|every day/i.test(evidence)&&!/工作日|weekdays/i.test(evidence),'每日周期需要本条消息授权');
-      if(repeat==='weekly')requireThat(/每周|每星期|每个?礼拜|weekly|every (?:week|mon|tue|wed|thu|fri|sat|sun)/i.test(evidence),'每周周期需要本条消息授权');
       if(repeat==='weekdays')requireThat(!['Sat','Sun'].includes(new Intl.DateTimeFormat('en',{timeZone,weekday:'short'}).format(Date.parse(s.dueAt))),'首次时点须为工作日');
-    }else {
+    }else{
       requireThat(['once','each'].includes(repeat),'事件需要按首次或每次发生登记');
-      if(timing==='current')requireThat(s.trigger!=='session_changed'&&currentCondition.test(instruction)&&
-        !/下次|下一次|每次新|每次的?新|重新|\bnext\b/i.test(clause),'处理已有状态需要用户明确授权，否则从下次新事件开始');
+      requireThat(timing==='next'||s.trigger!=='session_changed','会话只能观察登记后的新活动');
     }
     const workers=snap.workers||[],sourceWorker=workers.find(w=>w.target===a.sourceTarget&&w.deviceId);
-    if(a.sourceTarget){
-      requireThat(sourceWorker&&identifies(evidence,sourceWorker),'当前消息没有指定这个来源执行端');
+    if(!absent(a.sourceTarget)){
+      requireThat(sourceWorker,'来源执行端未登记');
       s.sourceTarget=sourceWorker.target;s.sourceDevice=sourceWorker.deviceId;
     }
+    if(s.trigger!=='session_changed'&&!absent(a.machine))
+      requireThat(sourceWorker?.deviceId===a.machine,'来源设备与已登记的执行端不一致');
     if(taskTrigger(s)){
       requireThat(Number.isSafeInteger(snap.wakeCursor)&&snap.wakeCursor>=0,'缺少可重放的任务回执来源');
-      requireThat((s.trigger==='task_failed'?/失败|\bfail(?:s|ed|ure|ures)?\b/i:/完成|交回|成功|succeed|success|finish|complet/i).test(evidence),'用户原话与回执条件不符');
+      requireThat(a.match==null||typeof a.match==='string'&&clean(a.match).length<=160,'任务名称筛选条件需要在 160 字以内');
+      requireThat(a.taskId==null||typeof a.taskId==='string','任务编号无效');
       s.cursor=snap.wakeCursor;s.match=clean(a.match);s.taskId=clean(a.taskId);
-      if(s.match){
-        requireThat(s.match.length<=160&&!/^(?:任务|新|的|失败|完成|task|new|failure|failed|completed)$/iu.test(s.match)&&
-          evidence.toLowerCase().includes(s.match.toLowerCase()),'任务筛选条件需要引用原话中的具体任务名称');
-        const nameEvidence=evidence.replace(/[“”「」『』"']/gu,'');
-        const qualifier=/每(?:次|个|项|当)(?:的)?(?:新(?:的)?)?([^，。；：,.;:\s]{1,60}?)任务/u.exec(nameEvidence)?.[1];
-        if(qualifier)requireThat(s.match.includes(qualifier),'筛选范围需要保留完整的任务名称');
-      }
       if(s.taskId){
         const found=snap.tasks?.find(t=>t.id===s.taskId);
-        requireThat(found&&(evidence.includes(s.taskId)||found.title&&evidence.includes(found.title)),'需要明确可识别的任务编号或名称');
+        requireThat(found&&(!s.sourceTarget||found.target===s.sourceTarget),'未找到指定范围内的任务编号');
       }
-      requireThat(s.match||s.taskId||/所有任务|任何任务|每(?:次|个|项)(?:新(?:的)?)?任务|全部任务|\b(?:any|every|all|each) (?:new )?tasks?\b/i.test(evidence),'请指定任务名称筛选条件或明确关注所有任务');
       s.initial=timing==='current'?(snap.tasks||[]).filter(t=>this.matchTask(s,t)).map(t=>this.taskFact(s,t)):[];
     }
     if(s.trigger==='agent_online'){
-      requireThat(sourceWorker&&/上线|在线|online|reconnect/i.test(evidence)&&typeof sourceWorker.online==='boolean','需要已登记且能观测上线状态的执行端');
+      requireThat(sourceWorker&&typeof sourceWorker.online==='boolean','需要已登记且能观测上线状态的执行端');
       s.baseline=String(sourceWorker.online);
       if(a.remindEveryHours!=null){
         const n=Number(a.remindEveryHours);
-        requireThat(repeat==='each'&&Number.isSafeInteger(n)&&n>=1&&n<=168&&
-          (n===1?/每(?:个)?小时|hourly|every hour/i:new RegExp('每'+n+'(?:个)?小时|every '+n+' hours','i')).test(evidence),'持续状态提醒需要明确小时间隔');
+        requireThat(['number','string'].includes(typeof a.remindEveryHours)&&repeat==='each'&&Number.isSafeInteger(n)&&n>=1&&n<=168,'持续在线提醒间隔须为 1 至 168 小时的整数');
         s.remindEveryHours=n;
       }
     }
     if(s.trigger==='session_changed'){
       const row=snap.sessions?.find(r=>r.machine===a.machine&&r.id===a.sessionId&&!r.archived);
-      const selected=this.store.sourceFor(turn.id);
-      requireThat(row&&Number.isFinite(Date.parse(row.updatedAt))&&
-        (selected?.machine===row.machine&&selected.id===row.id||evidence.includes(row.id)||row.title&&evidence.includes(row.title)&&snap.sessions.filter(other=>other.title===row.title&&!other.archived).length===1),
-        '需要明确选择要观察的会话');
-      requireThat(/会话|更新|新活动|session|update|activity/i.test(evidence),'需要指定会话更新条件');
+      requireThat(row?.machine&&row.id&&Number.isFinite(Date.parse(row.updatedAt)),'需要指定可观察的会话');
+      requireThat(!sourceWorker||sourceWorker.deviceId===row.machine&&sourceWorker.target===row.target,'会话与来源执行端不一致');
       s.session={machine:row.machine,id:row.id,target:row.target??null};s.baseline=row.updatedAt;
     }
     if(effect==='consult'){
       const target=workers.find(w=>w.target===a.target&&w.deviceId&&w.capabilities?.includes('read-only'));
       requireThat(target?.isolatedRead===true&&!target.needsCredentials,'缺少可接手隔离只读复核的已登记执行端');
-      const clause=evidence.split(/(?:派给|交给|让|委托|安排|由|\b(?:ask|have|assign|send to)\b)/iu).at(-1);
-      const exact=workers.filter(w=>clause.toLowerCase().includes(w.target.toLowerCase()));
-      const named=exact.length?exact:workers.filter(w=>identifies(clause,w));
-      requireThat(!named.length||named.some(w=>w.target===target.target),'复核执行端与用户指定设备不符');
       requireThat(!s.session||s.session.machine===target.deviceId&&s.session.target===target.target,'所选会话仅允许在来源设备与原 Agent 核对');
       s.actor=actor(target);
       const order=s.sourceWorkId&&this.store.work.order(s.sourceWorkId);
@@ -163,16 +130,14 @@ export class WakeRules {
     return s;
   }
   uniqueGrants(actions){
-    const accepted=[];
-    for(const action of actions){
-      if(action.type==='wake_rule'){
-        const rules=accepted.filter(a=>a.type==='wake_rule');
-        requireThat(!rules.some(a=>overlaps(a,action)&&!sameAction(a,action)),'同一段委托有不同的触发条件或动作，请分别说明。');
-        if(rules.some(a=>overlaps(a,action)))continue;
-      }
-      accepted.push(action);
-    }
-    return accepted;
+    const seen=new Set();
+    return actions.filter(action=>{
+      if(action.type!=='wake_rule')return true;
+      const key=actionKey(action);
+      if(seen.has(key))return false;
+      seen.add(key);
+      return true;
+    });
   }
   register(id,turn,s){
     return withTransaction(this.store,()=>{
@@ -182,10 +147,9 @@ export class WakeRules {
         requireThat(existing.source===turn.id,'规则编号已用于其他委托');
         return this.card(existing);
       }
-      const grants=this.db.prepare('SELECT id,spec FROM wake_rules WHERE source=?').all(turn.id)
-        .map(row=>({id:row.id,action:JSON.parse(row.spec)}));
-      this.uniqueGrants([...grants.map(g=>g.action),s]);
-      const duplicate=grants.find(g=>overlaps(g.action,s));
+      const key=actionKey(s);
+      const duplicate=this.db.prepare('SELECT id,spec FROM wake_rules WHERE source=?').all(turn.id)
+        .find(row=>actionKey(JSON.parse(row.spec))===key);
       if(duplicate)return this.card(this.rule(duplicate.id));
       const workId=s.effect==='consult'?(s.sourceWorkId||turn.id):s.sourceWorkId;
       if(s.effect==='consult')this.store.continuity.recordPhoneTurn(turn.id,user.text,workId);
@@ -285,13 +249,6 @@ export class WakeRules {
     }
     return true;
   }
-  awaitingControl(r){
-    if(r.workId&&this.store.work.order(r.workId))return this.store.heldForInput(r.source);
-    const turns=this.db.prepare(`SELECT m.text FROM messages m JOIN turns t ON t.id=m.id
-      LEFT JOIN continuity_turns c ON c.turnId=t.id WHERE m.seq>(SELECT seq FROM messages WHERE id=?)
-      AND t.state!='done' AND (c.workId IS NULL OR c.workId=?)`).all(r.source,r.workId);
-    return turns.some(t=>/暂停|停止|取消|等我|撤回|先别|先不要|\b(?:pause|stop|cancel|hold|wait)\b/i.test(t.text));
-  }
   async events(r,s,broker,now){
     // Limit work per tick; cursor and occurrences commit together.
     for(let page=0;page<8;page++){
@@ -389,7 +346,7 @@ export class WakeRules {
       return;
     }
     if(s.effect==='notify'){
-      if(this.awaitingControl(r))return;
+      if(this.store.heldForInput(r.source))return;
       this.finish(r,s,o,'提醒：'+s.evidence,toISO(now));return;
     }
     const requestId=o.requestId;
@@ -397,7 +354,7 @@ export class WakeRules {
     if(!task){
       const fresh=this.rule(r.id);
       if(!this.fence(fresh,s)||fresh.version!==o.version)return;
-      if(this.awaitingControl(r))return;
+      if(this.store.heldForInput(r.source))return;
       const worker=workers?.find(w=>w.target===s.actor.target&&w.deviceId===s.actor.deviceId);
       requireThat(worker&&worker.isolatedRead===true&&!worker.needsCredentials&&worker.capabilities?.includes('read-only'),'缺少已授权且支持隔离只读复核的执行端，等待恢复。');
       const row=s.session&&rows?.find(item=>item.machine===s.session.machine&&item.id===s.session.id&&item.target===s.actor.target&&!item.archived);
@@ -423,7 +380,7 @@ export class WakeRules {
           '\n触发事实：'+fact.label+(material?'\n来源摘录（仅供核对）：'+JSON.stringify(material):'');
       }
       const latest=this.rule(r.id);
-      if(!this.fence(latest,s)||latest.version!==o.version||this.awaitingControl(r))return;
+      if(!this.fence(latest,s)||latest.version!==o.version||this.store.heldForInput(r.source))return;
       this.db.prepare("UPDATE wake_occurrences SET state='sending',prompt=coalesce(prompt,?) WHERE seq=? AND finishedAt IS NULL").run(prompt,o.seq);
       task=await broker('/submit',{requestId,target:s.actor.target,prompt,mode:'read-only',exportFile:false,inputTaskId:null});
     }

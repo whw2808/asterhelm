@@ -168,10 +168,13 @@ export class PersonalStore {
     this.reply('reply-'+turn.id,turn.id,answer,notify);
     this.db.prepare("UPDATE turns SET state='done',plan=NULL WHERE id=?").run(turn.id);
   }
+  wasForgotten(key,scope,text){
+    const keyWasForgotten=this.db.prepare('SELECT 1 FROM forgotten_keys WHERE key=? AND scope=?').get(key,scope);
+    const valueWasForgotten=this.db.prepare('SELECT 1 FROM forgotten WHERE hash=?').get(fingerprint(scope+'|'+text));
+    return Boolean(keyWasForgotten||valueWasForgotten);
+  }
   remember(turn,a){
-    const keyWasForgotten=this.db.prepare('SELECT 1 FROM forgotten_keys WHERE key=? AND scope=?').get(a.key,a.scope);
-    const valueWasForgotten=this.db.prepare('SELECT 1 FROM forgotten WHERE hash=?').get(fingerprint(a.scope+'|'+a.text));
-    if((keyWasForgotten||valueWasForgotten) && !/重新记住|再次记住|重新设置|以后请记住|remember again|remember anew/i.test(turn.text))return false;
+    if(this.wasForgotten(a.key,a.scope,a.text)&&a.restore!==true)return false;
     this.db.prepare('DELETE FROM forgotten_keys WHERE key=? AND scope=?').run(a.key,a.scope);
     this.db.prepare('INSERT OR REPLACE INTO pref_provenance VALUES(?,?,?,?)').run(a.key,a.scope,turn.id,a.text);
     this.db.prepare(`INSERT INTO prefs(id,key,text,scope,source,updatedAt) VALUES(?,?,?,?,?,?)

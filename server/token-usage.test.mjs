@@ -58,19 +58,28 @@ test('concurrent calls have independent receipts, including attempts without usa
   assert.deepEqual([ledger.summary().allTime.totalTokens,ledger.summary().allTime.unknownCalls],[15,0]);
 });
 
-test('both board layouts and a repeated chat inquiry use the ledger, without dispatch or model calls',async t=>{
+test('board and offline chat read the ledger locally; an online paraphrase retrieves it after semantic routing',async t=>{
   const store=new PersonalStore(':memory:');t.after(()=>store.db.close());
   const contexts={readContexts:()=>[],contextCoverage:()=>[]};
-  let calls=0;const planner={plan:async(input,{onUsage})=>{calls++;onUsage({inputTokens:10,outputTokens:3,totalTokens:13});}};
+  let calls=0;
+  const planner={plan:async(input,{onUsage})=>{
+    calls++;onUsage({inputTokens:10,outputTokens:3,totalTokens:13});
+    return {reply:'',actions:[{type:'chat_query',query:'usage',evidence:input.currentUser}]};
+  }};
   const agent=new PersonalAgent({store,contexts,planner,broker:()=>[]});
   await agent.planner.plan({phase:'workWake'});
   const plain=await agent.board(),machines=await agent.board({layout:'machines'});
   assert.equal(plain.usage.today.totalTokens,13);assert.deepEqual(machines.usage,plain.usage);
   const req={text:'星舵今天用了多少 token？',requestId:'inspect-once'};
-  const first=await agent.receive(req);assert.deepEqual(await agent.receive(req),first);
+  const offline=new PersonalAgent({store,contexts,planner:{offline:true},broker:()=>[]});
+  const first=await offline.receive(req);assert.deepEqual(await offline.receive(req),first);
   assert.equal(calls,1);
   assert.equal(store.pending(),undefined);
   assert.match(store.history().messages.at(-1).text,/13/);
+  await agent.receive({requestId:'online',text:'How much of the coordinator token budget did we use?'});
+  await agent.step();
+  assert.equal(calls,2);assert.equal(store.pending(),undefined);
+  assert.match(store.history().messages.at(-1).text,/26/);
   assert.equal(isUsageQuestion('分析这两种模型的 token 用量'),false);
   assert.equal(isUsageQuestion('展厅工作站的 Codex 今天用了多少 token？'),false);
   assert.equal(isUsageQuestion('查看 Token 用量'),true);
