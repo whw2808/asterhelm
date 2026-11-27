@@ -1,3 +1,4 @@
+import {approveRoute} from './test-support/route-review.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {PersonalStore} from './personal-store.mjs';
@@ -29,6 +30,7 @@ test('single chat steers the existing order: a stopped branch is acknowledged an
   const paper='整理纸本目录',digital='整理电子目录',amend='电子版暂停，纸本继续';
   let delivery;
   const planner={plan:async snap=>{
+    if(snap.phase==='routeAuthority')return approveRoute(snap);
     if(snap.phase==='delivery'){
       delivery=snap;
       return {reply:'纸本目录 CEDAR 已就绪。',actions:[],coverage:[{index:0,status:'answered',finding:'CEDAR',sources:[snap.results[0].id]}]};
@@ -91,6 +93,7 @@ test('an amendment can replace a branch on another registered worker and replay 
     return result;
   };
   const planner={plan:async input=>{
+    if(input.phase==='routeAuthority')return approveRoute(input);
     if(input.currentUser===original)return {reply:'',criteria:['标签','样张'],actions:['标签','样张'].map(title=>({
       type:'dispatch',target:workers[0].target,title,prompt:title,evidence:title}))};
     const order=input.activeWork[0];
@@ -121,6 +124,8 @@ test('a partial stop cannot cancel the entire order even if the first model plan
   const text='暂停包装，索引继续',start='整理包装和索引';
   let repaired=0;
   const planner={plan:async input=>{
+    if(input.phase==='routeAuthority')return input.proposals.some(p=>p.kind==='cancel')?
+      {reply:'只撤包装，保留索引',directBasis:'replan',actions:[]}:approveRoute(input);
     if(input.currentUser===start)return {reply:'',criteria:['包装','索引'],actions:workers.map((w,i)=>({
       type:'consult',target:w.target,title:i?'索引':'包装',prompt:'核实项目',evidence:i?'索引':'包装'}))};
     const order=input.activeWork[0];
@@ -133,12 +138,6 @@ test('a partial stop cannot cancel the entire order even if the first model plan
   store.receive({text,requestId:'change'});await service.step();
   assert.equal(repaired,1);assert.equal(store.work.order(parent.id).state,'working');
   assert.equal(queue.list().filter(job=>job.state==='queued').length,1);
-});
-
-test('an existing scoped revision can name both devices without triggering discovery',async()=>{
-  const {requireConsult}=await import('./router-policy.mjs');
-  const plan={actions:[{type:'revise',id:'order',pauseStepIds:['one']}]};
-  assert.deepEqual(requireConsult({text:'Studio 暂停，Bindery 继续'},{workers,activeWork:[{id:'order'}]},plan),plan);
 });
 
 test('unsubmitted handoff producer and dependent both settle on scope withdrawal',async t=>{

@@ -35,6 +35,10 @@ function proposal(row,item){
   const nextStep='让来源设备的 Agent 根据已授权的记录整理清单，以只读方式在主聊天交付。';
   return {title,goal,criteria,nextStep,fact,localAlias,sharedAlias,goalAlias,identified:Boolean(artifact&&request)};
 }
+function lostSource(current,source){
+  return current&&(current.archived||current.visibility!=='recent-dialogue'||current.readOnly!==true||
+    current.target!==source.target||current.source!==source.connector);
+}
 function eligibleWorker(source,workers){
   return workers.find(w=>w.deviceId===source.machine&&w.target===source.target&&w.online===true&&
     w.isolatedRead===true&&!w.needsCredentials&&w.contextSources?.includes(source.connector)&&w.capabilities?.includes('read-only'));
@@ -55,6 +59,8 @@ export class ProactiveCandidates {
       CREATE TABLE IF NOT EXISTS candidate_clues(candidate TEXT,stream TEXT,origin TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(candidate,stream));
       CREATE TABLE IF NOT EXISTS candidate_cursors(stream TEXT PRIMARY KEY,millis INTEGER NOT NULL,event TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS candidate_events(stream TEXT,event TEXT,PRIMARY KEY(stream,event));
+      CREATE TABLE IF NOT EXISTS candidate_source_reviews(candidate TEXT,turnId TEXT,itemId TEXT,retryAt INTEGER,
+        PRIMARY KEY(candidate,turnId,itemId));
       CREATE TABLE IF NOT EXISTS candidate_checks(requestId TEXT PRIMARY KEY,candidate TEXT NOT NULL,actor TEXT NOT NULL,prompt TEXT NOT NULL,
         taskId TEXT,state TEXT NOT NULL,startedAt TEXT,finishedAt TEXT,result TEXT,withdrawn INTEGER NOT NULL DEFAULT 0,
         failures INTEGER NOT NULL DEFAULT 0,retryAt INTEGER NOT NULL DEFAULT 0);
@@ -212,9 +218,7 @@ export class ProactiveCandidates {
     }
     for(const row of this.db.prepare("SELECT * FROM proactive_candidates WHERE status IN ('checking','waiting')").all()){
       const source=JSON.parse(row.source),current=rows.find(r=>r.machine===source.machine&&r.id===source.session);
-      if(this.withdrawn(source)||current&&(current.archived||current.visibility!=='recent-dialogue'||current.readOnly!==true||current.target!==source.target||current.source!==source.connector||
-        stopped.test(current.evidence?.findLast(e=>e.role==='user')?.text||'')||
-        (Date.parse(current.evidence?.at(-1)?.at)>Date.parse(source.at)&&resolved.test(current.evidence.at(-1).text)))){this.stop(row,'来源已退出跟进。');continue;}
+      if(this.withdrawn(source)||lostSource(current,source)){this.stop(row,'来源已退出跟进。');continue;}
       const existing=this.linkedOrder(source);
       if(existing&&!['working','synthesizing'].includes(existing.state)){
         if(row.requestId)this.db.prepare('UPDATE candidate_checks SET withdrawn=1 WHERE requestId=? AND finishedAt IS NULL AND withdrawn=0').run(row.requestId);
@@ -233,7 +237,52 @@ export class ProactiveCandidates {
       }
     }
   }
-  async advance(check,workers,broker,now){
+  async reviewSource(row,current,source,planner,now){
+    const manual=this.db.prepare(`SELECT m.createdAt FROM candidate_decisions d JOIN messages m ON m.id=d.turnId
+      WHERE d.candidate=? AND d.decision='recheck' ORDER BY m.seq DESC LIMIT 1`).get(row.id);
+    const after=Math.max(Date.parse(source.at),manual?Date.parse(manual.createdAt):0);
+    const manualRecheck=Boolean(manual&&row.status==='checking');
+    const review=this.db.prepare('SELECT retryAt FROM candidate_source_reviews WHERE candidate=? AND turnId=? AND itemId=?');
+    const pending=[];
+    for(const item of current.evidence||[]){
+      const at=Date.parse(item.at);
+      if(item.turnId===source.turn&&item.itemId===source.item)continue;
+      if(!item.turnId||!item.itemId||!(at>after&&at<=now)||!['user','assistant'].includes(item.role))continue;
+      const old=review.get(row.id,item.turnId,item.itemId);
+      if(old?.retryAt===null)continue;
+      if(old?.retryAt>now)return false;
+      const text=excerpt(item.text,700);
+      if(text)pending.push({role:item.role,turnId:item.turnId,itemId:item.itemId,at:item.at,text});
+    }
+    // A later assistant report can settle a suggestion, but a phone recheck
+    // still needs its own receipt. Only a newer user withdrawal can stop it.
+    if(!pending.length||manualRecheck&&pending.every(event=>event.role==='assistant'))return true;
+    if(!planner?.plan||planner.offline)return false;
+    const mark=this.db.prepare('INSERT OR REPLACE INTO candidate_source_reviews VALUES(?,?,?,?)');
+    const markAll=retryAt=>{for(const e of pending)mark.run(row.id,e.turnId,e.itemId,retryAt);};
+    this.atomic(()=>markAll(now+60000));
+    const candidate={id:row.id,version:row.version,goal:row.goal,fact:row.fact,manualRecheck};
+    let result;
+    try{
+      result=await planner.plan({phase:'candidateSourceReview',candidate,
+        source:{machine:source.machine,target:source.target,connector:source.connector,session:source.session},events:pending});
+    }catch{return false;}
+    const [decision]=Array.isArray(result?.actions)?result.actions:[];
+    const event=pending.find(e=>e.turnId===decision?.turnId&&e.itemId===decision?.itemId);
+    if(result?.actions?.length!==1||decision?.type!=='candidate_source_status'||decision.id!==row.id||
+      decision.version!==row.version||!event||!['keep','withdrawn','resolved'].includes(decision.state)||
+      decision.state==='withdrawn'&&event.role!=='user')return false;
+    return this.atomic(()=>{
+      // A later card decision or scope revision supersedes this observation.
+      const fresh=this.get(row.id);
+      if(fresh?.version!==row.version||fresh.requestId!==row.requestId||fresh.status!==row.status)return false;
+      markAll(null);
+      if(decision.state==='withdrawn'||(decision.state==='resolved'&&!manualRecheck))
+        this.stop(fresh,decision.state==='withdrawn'?'来源用户已撤回此项核对。':'来源的新记录已确认该事项完成。');
+      return true;
+    });
+  }
+  async advance(check,workers,broker,now,holdSubmission){
     const row=this.get(check.candidate),source=JSON.parse(row.source);
     if(now<check.retryAt&&!check.withdrawn)return;
     let task;
@@ -246,7 +295,7 @@ export class ProactiveCandidates {
       task=await broker('/getByRequestId',{requestId:check.requestId});
       if(!task){
         const fresh=this.get(row.id);
-        if(fresh.status!=='checking'||fresh.requestId!==check.requestId||this.withdrawn(source))return;
+        if(holdSubmission||fresh.status!=='checking'||fresh.requestId!==check.requestId||this.withdrawn(source))return;
         const worker=eligibleWorker(source,workers);
         if(!worker||check.failures>=3){
           // Tombstone the original request before declaring that no worker accepted it.
@@ -285,11 +334,26 @@ export class ProactiveCandidates {
       this.publish(row.id,ended);
     });
   }
-  async tick({rows=[],workers=[],broker,now=Date.now()}){
-    this.atomic(()=>{this.commitments();for(const row of rows)this.discover(row,workers,Number(now));this.refresh(rows,workers);});
+  async tick({rows=[],workers=[],broker,planner,now=Date.now()}){
+    now=Number(now);
+    const held=new Set(),heldSources=new Set();
+    for(const candidate of this.db.prepare("SELECT * FROM proactive_candidates WHERE status IN ('checking','waiting')").all()){
+      const source=JSON.parse(candidate.source),current=rows.find(r=>r.machine===source.machine&&r.id===source.session);
+      if(!current||this.withdrawn(source)||lostSource(current,source)||!this.grants(current).some(g=>g.origin===source.origin))continue;
+      const order=this.linkedOrder(source);
+      if(order&&!['working','synthesizing'].includes(order.state))continue;
+      if(!await this.reviewSource(candidate,current,source,planner,now)){
+        held.add(candidate.id);heldSources.add(sourceKey(current));
+      }
+    }
+    this.atomic(()=>{
+      this.commitments();
+      for(const row of rows)if(!heldSources.has(sourceKey(row)))this.discover(row,workers,now);
+      this.refresh(rows,workers);
+    });
     const checks=this.db.prepare('SELECT * FROM candidate_checks WHERE finishedAt IS NULL ORDER BY rowid').all();
     for(const check of checks){
-      try{await this.advance(check,workers,broker,Number(now));}
+      try{await this.advance(check,workers,broker,now,held.has(check.candidate));}
       catch{
         // Reconcile a lost reply immediately once. Repeated transport failures
         // back off without marking the request as either delivered or stopped.

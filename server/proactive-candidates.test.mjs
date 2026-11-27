@@ -6,6 +6,7 @@ import {join} from 'node:path';
 import {randomUUID} from 'node:crypto';
 import {PersonalStore} from './personal-store.mjs';
 import {ProactiveCandidates} from './proactive-candidates.mjs';
+import {approveRoute} from './test-support/route-review.mjs';
 import {configuredQueue} from './test-support/registered-queue.mjs';
 
 const baseline=Date.now();
@@ -103,7 +104,9 @@ test('a selected source losing body access withdraws its probe; new complete evi
   await f.tick([{...row,visibility:'metadata-only',evidence:[]}]);assert.equal(f.engine.cards()[0].status,'ignored');assert.ok(f.queue.get(task.id).cancelRequested);
   const complete=source('bench');complete.cwd='/exhibits/spring';f.watch(complete);await f.tick([complete]);
   complete.evidence[1]={...complete.evidence[1],itemId:'final-entry',at:stamp(4000),text:'All entries in catalogue.csv are complete; nothing is missing.'};
-  await f.tick([complete]);assert.equal(f.engine.cards().filter(c=>c.status!=='ignored').length,0);
+  await f.tick([complete],{planner:{plan:async ({candidate,events})=>({reply:'',actions:[{type:'candidate_source_status',
+    id:candidate.id,version:candidate.version,state:'resolved',turnId:events[0].turnId,itemId:events[0].itemId}]})}});
+  assert.equal(f.engine.cards().filter(c=>c.status!=='ignored').length,0);
 });
 test('updating an open exhibit commitment anchors a new clue to the user goal without dispatch to an unselected machine',async t=>{
   const f=await setup(t),turn=f.turn('请记为待办：展览标签 catalogue.csv 仍需核对缺项。');
@@ -141,7 +144,9 @@ test('an accepted check reports its original evidence when a new fact changes th
   const f=await setup(t),row=source('desk');f.watch(row);await f.tick([row]);
   const task=f.queue.claim('desk.code');f.queue.finish(task.target,{id:task.id,state:'succeeded',result:'Source item result confirms the paper checklist is missing.'});
   row.evidence[1]={...row.evidence[1],text:'Still pending: catalogue.csv lacks a shipping code.',at:stamp(3100),itemId:'shipping'};
-  await f.tick([row]);const [card]=f.engine.cards();assert.match(card.detail,/shipping code/);assert.match(card.detail,/paper checklist/);
+  await f.tick([row],{planner:{plan:async ({candidate,events})=>({reply:'',actions:[{type:'candidate_source_status',
+    id:candidate.id,version:candidate.version,state:'keep',turnId:events[0].turnId,itemId:events[0].itemId}]})}});
+  const [card]=f.engine.cards();assert.match(card.detail,/shipping code/);assert.match(card.detail,/paper checklist/);
   const approval=f.turn('同意立项');f.engine.decide(approval,{id:card.id,version:card.version,decision:'approve'});
   assert.match(f.engine.cards()[0].detail,/paper checklist/);assert.match(f.store.work.card(approval.id).goal,/catalogue/);
 });
@@ -168,10 +173,22 @@ test('chat approval runs a native scoped step and two subsequently selected desk
   const rows=[initial,first,second],agent=new PersonalAgent({store:f.store,
     contexts:{readContexts:()=>rows,readSession:(_home,machine,id)=>rows.find(r=>r.machine===machine&&r.id===id),contextCoverage:()=>[]},
     broker:async(route,input)=>route==='/workers'?f.queue.workers():route==='/list'?f.queue.list():route==='/wakeEvents'?f.queue.wakeEvents(input):f.broker(route,input),
-    planner:{plan:async snap=>snap.phase==='delivery'?{actions:[],reply:'Paper catalogue requires the checklist column.',
-      coverage:[{index:0,status:'answered',finding:'Add the checklist column.',sources:[snap.results[0].id]}]}:{reply:'收到。',actions:[],references:[]}}});
+    planner:{plan:async snap=>{
+      if(snap.phase==='routeAuthority')return approveRoute(snap);
+      if(snap.phase==='selectedFollow')return {reply:'',actions:[{type:'leave_follow',evidence:snap.currentUser}]};
+      if(snap.currentUser==='同意'){
+        const [card]=snap.cards;
+        assert.equal(card.presentedLast,true);
+        return {reply:'',actions:[{type:'card_decision',id:card.id,version:card.version,decision:'approve',evidence:'同意'}]};
+      }
+      return snap.phase==='delivery'?{actions:[],reply:'Paper catalogue requires the checklist column.',
+      coverage:[{index:0,status:'answered',finding:'Add the checklist column.',sources:[snap.results[0].id]}]}:{reply:'已关联。',actions:[],references:[],directBasis:'conversation'};
+    }}});
   const request={requestId:'confirm-exhibit',text:'同意'};
-  const root=await agent.receive(request);assert.equal(root.workId,root.id);assert.equal((await agent.receive(request)).workId,root.id);
+  const root=await agent.receive(request);
+  assert.equal(f.store.work.activeCount(),0);
+  await agent.step();
+  assert.equal((await agent.receive(request)).workId,root.id);
   await agent.step();const task=f.queue.claim('desk.code');assert.ok(task);assert.notEqual(task.id,probe.id);assert.equal(task.mode,'read-only');
   for(const row of [first,second]){
     const joined=await agent.receive({requestId:randomUUID(),text:'关联这项工作，接收摘要。',context:{machine:row.machine,id:row.id},workId:root.id});

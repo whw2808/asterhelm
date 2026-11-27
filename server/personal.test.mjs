@@ -1,3 +1,4 @@
+import {approveRoute} from './test-support/route-review.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {mkdtempSync,rmSync} from 'node:fs';
@@ -67,13 +68,14 @@ test('persist planned actions, report only once and keep active commitments',asy
  const chat='帮我在 Bench 检查状态，完成提醒我。';
  const agent=new PersonalAgent({store,contexts:{readContexts:()=>[{...row,updatedAt:rev}],contextCoverage:()=>[]},
    planner:{plan:async(input)=>{modelCalls++;
+     if(input.phase==='routeAuthority')return approveRoute(input);
      if(input.phase==='delivery')return {reply:'检查完毕，结果已核实。',actions:[],coverage:[{index:0,status:'answered',finding:'检查完毕',sources:['test-task']}]};
      return {reply:'我来检查。',references:[row],actions:[{type:'dispatch',target:'bench.code',sessionId:'external',notify:true,prompt:'检查状态',evidence:'检查状态'}]};}},
    broker:async(route,args)=>{if(route==='/workers')return [worker('bench','bench.code')];if(route==='/list')return [];
    if(route==='/submit'){if(!tasks.has(args.requestId))tasks.set(args.requestId,{id:'test-task',result:'检查完毕',state:'succeeded'});return tasks.get(args.requestId);}
    if(route==='/get')return [...tasks.values()][0];}});
  store.receive({text:chat,requestId:'r1'});await agent.step();await agent.tick();await agent.deliver();await agent.deliver();await agent.tick();
- assert.equal(modelCalls,2);assert.equal(tasks.size,1);assert.equal(store.notifications({}).items.length,1);
+ assert.equal(modelCalls,3);assert.equal(tasks.size,1);assert.equal(store.notifications({}).items.length,1);
  assert.ok(store.history().messages.some(m=>m.text==='检查完毕，结果已核实。'));assert.equal(store.history().messages[0].work.state,'completed');
  store.watch('watchId',row,'等待活动','r1');await agent.tick();
  assert.equal(store.notifications({}).items.length,1);

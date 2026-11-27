@@ -1,3 +1,4 @@
+import {approveRoute} from '../server/test-support/route-review.mjs';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -188,7 +189,8 @@ test('Chat Completions planner dispatches to a native executor and returns the r
       assert.equal(request.model, 'fixture');
       const input = JSON.parse(request.messages[1].content);
       let output;
-      if (input.phase === 'delivery') {
+      if (input.phase === 'routeAuthority') output = approveRoute(input);
+      else if (input.phase === 'delivery') {
         assert.equal(input.results[0].result, nativeOutput);
         output = { reply: finalAnswer, actions: [], coverage: [{
           index: 0, status: 'answered', finding: nativeOutput, sources: [input.results[0].id],
@@ -226,9 +228,9 @@ fs.writeFileSync(args[args.indexOf('-o') + 1], 'sample=ok');
     const cookie = await sendChat(env, hub, sample, finalAnswer);
     const board = await phoneApi(env)('board', {}, cookie);
     const phases = (await board.json()).value.usage.byPhase;
-    for (const phase of ['chat', 'delivery']) {
-      assert.equal(phases.find(row => row.phase === phase)?.totalTokens, 17);
-    }
+    // The chat phase includes the planner and independent authorization call.
+    assert.equal(phases.find(row => row.phase === 'chat')?.totalTokens, 34);
+    assert.equal(phases.find(row => row.phase === 'delivery')?.totalTokens, 17);
   } finally { await worker.stop(); await hub.stop(); }
 });
 
